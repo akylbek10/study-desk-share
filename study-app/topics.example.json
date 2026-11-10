@@ -1,0 +1,935 @@
+{
+  "_note": "Each topic's 'sources' are path prefixes inside ../text. Files whose path starts with any prefix are given to Gemini as that topic's material. 'shared' prefixes are added to every topic in that subject.",
+  "term": {
+    "name": "Semester 1",
+    "week1": "2026-09-21",
+    "_note": "Week 1 starts Monday 21 Sep 2026 (EAP Semester 1 overview). Weeks that start inside a break are not counted."
+  },
+  "breaks": [
+    {
+      "name": "Christmas holidays",
+      "start": "2026-12-15",
+      "end": "2027-01-11"
+    }
+  ],
+  "exams": [
+    {
+      "subject": "Technical Maths",
+      "name": "Maths end of Semester 1",
+      "date": "2027-01-12"
+    },
+    {
+      "subject": "Physics",
+      "name": "Physics end of Semester 1 (20%)",
+      "date": "2027-01-12"
+    },
+    {
+      "subject": "Chemistry",
+      "name": "Chemistry end of Semester 1 test (20%)",
+      "date": "2027-01-12"
+    }
+  ],
+  "_timetable_note": "day: 1 = Monday ... 5 = Friday. Fill it with: python3 setup_topics.py --timetable <screenshot>",
+  "timetable": [
+    {
+      "day": 1,
+      "start": "09:00",
+      "end": "11:00",
+      "subject": "Physics",
+      "code": "FSPH0000",
+      "room": "Room",
+      "teacher": "Teacher"
+    }
+  ],
+  "subjects": {
+    "Technical Maths": {
+      "shared": [
+        "Technical Maths/04 Revision Materials for Students/Technical Maths Revision checklist.docx.txt"
+      ],
+      "topics": [
+        {
+          "id": "m-coord",
+          "name": "Linear coordinate geometry",
+          "code": "AC1.1",
+          "start": "2026-09-15",
+          "sources": [
+            "Technical Maths/07 Week 1.1",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/A "
+          ]
+        },
+        {
+          "id": "m-quad",
+          "name": "Quadratics & inequalities",
+          "code": "AC1.2",
+          "start": "2026-09-22",
+          "sources": [
+            "Technical Maths/08 Week 1.2",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/Ci "
+          ]
+        },
+        {
+          "id": "m-poly",
+          "name": "Polynomials, factor & remainder theorem",
+          "code": "AC1.4",
+          "start": "2026-09-29",
+          "sources": [
+            "Technical Maths/09 Week 1.3",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/Cii "
+          ]
+        },
+        {
+          "id": "m-func",
+          "name": "Functions & transformations",
+          "code": "AC1.5",
+          "start": "2026-10-06",
+          "sources": [
+            "Technical Maths/10 Week 1.4"
+          ]
+        },
+        {
+          "id": "m-circle",
+          "name": "Circle geometry",
+          "code": "AC1.3",
+          "start": "2026-10-13",
+          "sources": [
+            "Technical Maths/11 Week 1.5"
+          ]
+        },
+        {
+          "id": "m-logs",
+          "name": "Indices, exponentials & logs",
+          "code": "AC2.1",
+          "start": "2026-10-20",
+          "sources": [
+            "Technical Maths/12 Week 1.6",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/D ",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/E "
+          ]
+        },
+        {
+          "id": "m-trig",
+          "name": "Trigonometry",
+          "code": "AC3.1",
+          "start": "2026-10-27",
+          "sources": [
+            "Technical Maths/13 Week 1.7",
+            "Technical Maths/14 Week 1.8",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/F "
+          ]
+        },
+        {
+          "id": "m-binom",
+          "name": "Binomial expansion",
+          "code": "AC2.3",
+          "start": "2026-11-10",
+          "sources": [
+            "Technical Maths/15 Week 1.9",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/Di "
+          ]
+        },
+        {
+          "id": "m-seq",
+          "name": "Sequences & series",
+          "code": "AC2.2",
+          "start": "2026-11-17",
+          "sources": [
+            "Technical Maths/16 Week 1.10",
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/Dii "
+          ]
+        },
+        {
+          "id": "m-diff",
+          "name": "Differentiation",
+          "code": "AC3.2",
+          "start": "2026-11-24",
+          "sources": [
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/G "
+          ]
+        },
+        {
+          "id": "m-int",
+          "name": "Integration",
+          "code": "AC3.3",
+          "start": "2026-12-08",
+          "sources": [
+            "Technical Maths/04 Revision Materials for Students/02 Questions By Topic (From 2018)/H "
+          ]
+        }
+      ],
+      "plan_source": "Week folders on IntoStudy (Week 1.1 to 1.10); later weeks estimated",
+      "plan": [
+        {
+          "week": 1,
+          "topics": [
+            "m-coord"
+          ],
+          "focus": "Linear coordinate geometry (AC1.1)"
+        },
+        {
+          "week": 2,
+          "topics": [
+            "m-quad"
+          ],
+          "focus": "Quadratic equations and inequalities (AC1.2)"
+        },
+        {
+          "week": 3,
+          "topics": [
+            "m-poly"
+          ],
+          "focus": "Polynomials, division, factor and remainder theorem (AC1.4)"
+        },
+        {
+          "week": 4,
+          "topics": [
+            "m-func"
+          ],
+          "focus": "Functions (AC1.5)"
+        },
+        {
+          "week": 5,
+          "topics": [
+            "m-circle"
+          ],
+          "focus": "Circle geometry (AC1.3)"
+        },
+        {
+          "week": 6,
+          "topics": [
+            "m-logs"
+          ],
+          "focus": "Indices, exponentials and logs (AC2.1)"
+        },
+        {
+          "week": 7,
+          "topics": [
+            "m-trig"
+          ],
+          "focus": "Trigonometry (AC3.1)"
+        },
+        {
+          "week": 8,
+          "topics": [
+            "m-trig"
+          ],
+          "focus": "Trigonometry continued (AC3.1)"
+        },
+        {
+          "week": 9,
+          "topics": [
+            "m-binom"
+          ],
+          "focus": "Binomial expansions (AC2.3)"
+        },
+        {
+          "week": 10,
+          "topics": [
+            "m-seq"
+          ],
+          "focus": "Sequences and series (AC2.2)"
+        },
+        {
+          "week": 11,
+          "topics": [
+            "m-diff"
+          ],
+          "focus": "Differentiation",
+          "guess": true
+        },
+        {
+          "week": 12,
+          "topics": [
+            "m-diff"
+          ],
+          "focus": "Differentiation",
+          "guess": true
+        },
+        {
+          "week": 13,
+          "topics": [
+            "m-int"
+          ],
+          "focus": "Integration",
+          "guess": true
+        }
+      ]
+    },
+    "Physics": {
+      "shared": [
+        "Physics/02 Module Resources/Physics Data Formulae and Relationships 2026-27.pdf.txt"
+      ],
+      "topics": [
+        {
+          "id": "p-units",
+          "name": "Units, uncertainties & graphs",
+          "code": "AC1",
+          "start": "2026-09-15",
+          "sources": [
+            "Physics/05 AC1"
+          ]
+        },
+        {
+          "id": "p-states",
+          "name": "Solids, liquids, gases & density",
+          "code": "AC3.1",
+          "start": "2026-09-22",
+          "sources": [
+            "Physics/06 AC3 Materials/01 ",
+            "Physics/03 Homework/01 "
+          ]
+        },
+        {
+          "id": "p-elastic",
+          "name": "Elasticity",
+          "code": "AC3.2",
+          "start": "2026-09-29",
+          "sources": [
+            "Physics/06 AC3 Materials/02 ",
+            "Physics/03 Homework/03 ",
+            "Physics/04 Quizzes/02 "
+          ]
+        },
+        {
+          "id": "p-thermal",
+          "name": "Thermal physics: specific & latent heat",
+          "code": "AC3.3",
+          "start": "2026-10-06",
+          "sources": [
+            "Physics/06 AC3 Materials/03 ",
+            "Physics/03 Homework/02 ",
+            "Physics/04 Quizzes/01 "
+          ]
+        },
+        {
+          "id": "p-gases",
+          "name": "Ideal gases",
+          "code": "AC3.4",
+          "start": "2026-10-13",
+          "sources": [
+            "Physics/06 AC3 Materials/04 ",
+            "Physics/03 Homework/04 ",
+            "Physics/04 Quizzes/03 "
+          ]
+        },
+        {
+          "id": "p-vectors",
+          "name": "Scalars & vectors",
+          "code": "AC2",
+          "start": "2026-10-20",
+          "sources": [
+            "Physics/07 AC2 Mechanics/01 ",
+            "Physics/03 Homework/05 ",
+            "Physics/04 Quizzes/04 "
+          ]
+        },
+        {
+          "id": "p-kinem",
+          "name": "Kinematics",
+          "code": "AC2",
+          "start": "2026-10-27",
+          "sources": [
+            "Physics/07 AC2 Mechanics/02 ",
+            "Physics/03 Homework/06 "
+          ]
+        },
+        {
+          "id": "p-dynamics",
+          "name": "Dynamics: Newton's laws",
+          "code": "AC2",
+          "start": "2026-11-03",
+          "sources": [
+            "Physics/07 AC2 Mechanics/03 ",
+            "Physics/03 Homework/07 "
+          ]
+        },
+        {
+          "id": "p-statics",
+          "name": "Statics",
+          "code": "AC2",
+          "start": "2026-11-10",
+          "sources": [
+            "Physics/07 AC2 Mechanics/04 "
+          ]
+        },
+        {
+          "id": "p-energy",
+          "name": "Work done & energy",
+          "code": "AC2",
+          "start": "2026-11-17",
+          "sources": [
+            "Physics/07 AC2 Mechanics/05 Work",
+            "Physics/07 AC2 Mechanics/06 Work"
+          ]
+        },
+        {
+          "id": "p-circular",
+          "name": "Circular motion",
+          "code": "AC2",
+          "start": "2026-11-17",
+          "sources": [
+            "Physics/07 AC2 Mechanics/05 Circular"
+          ]
+        },
+        {
+          "id": "p-momentum",
+          "name": "Momentum & collisions",
+          "code": "AC2",
+          "start": "2026-11-17",
+          "sources": [
+            "Physics/07 AC2 Mechanics/07 Collisions"
+          ]
+        },
+        {
+          "id": "p-elec",
+          "name": "Electricity",
+          "code": "",
+          "start": "2026-11-24",
+          "sources": []
+        }
+      ],
+      "plan_source": "Physics Student Planner (IntoStudy: Physics/02 Module Resources)",
+      "plan": [
+        {
+          "week": 1,
+          "topics": [
+            "p-units",
+            "p-states"
+          ],
+          "focus": "Units, prefixes and sig figs; density; solids, liquids, gases; hydrostatic pressure"
+        },
+        {
+          "week": 2,
+          "topics": [
+            "p-thermal"
+          ],
+          "focus": "Specific heat capacity; latent heat; thermal physics"
+        },
+        {
+          "week": 3,
+          "topics": [
+            "p-elastic"
+          ],
+          "focus": "Hooke's law; Young modulus; lab report results"
+        },
+        {
+          "week": 4,
+          "topics": [
+            "p-gases",
+            "p-vectors",
+            "p-kinem"
+          ],
+          "focus": "Ideal gases; vectors; displacement-time graphs"
+        },
+        {
+          "week": 5,
+          "topics": [
+            "p-kinem"
+          ],
+          "focus": "Kinematics and projectiles; lab report analysis"
+        },
+        {
+          "week": 6,
+          "topics": [
+            "p-dynamics",
+            "p-statics"
+          ],
+          "focus": "Dynamics; Newton's laws; statics"
+        },
+        {
+          "week": 7,
+          "topics": [
+            "p-energy"
+          ],
+          "focus": "Work, energy, KE and PE; efficiency; pressure"
+        },
+        {
+          "week": 8,
+          "topics": [
+            "p-circular",
+            "p-momentum"
+          ],
+          "focus": "Circular motion (centripetal force); momentum and collisions"
+        },
+        {
+          "week": 9,
+          "topics": [
+            "p-elec"
+          ],
+          "focus": "Current, p.d. and resistance; mean drift velocity; internal resistance and power"
+        },
+        {
+          "week": 10,
+          "topics": [
+            "p-elec"
+          ],
+          "focus": "Resistivity; coursework 1 details"
+        },
+        {
+          "week": 11,
+          "topics": [
+            "p-elec"
+          ],
+          "focus": "EMF and internal resistance; series and parallel DC circuits; circuit diagrams"
+        },
+        {
+          "week": 12,
+          "topics": [
+            "p-elec"
+          ],
+          "focus": "Kirchhoff's laws; potential dividers"
+        },
+        {
+          "week": 13,
+          "topics": [
+            "p-elec"
+          ],
+          "focus": "Capacitance parts 1 and 2"
+        },
+        {
+          "week": 14,
+          "topics": [],
+          "focus": "Revision"
+        }
+      ],
+      "plan_file": "Physics/02 Module Resources/Student Physics Plan.pdf"
+    },
+    "Chemistry": {
+      "shared": [
+        "Chemistry/08 EoS1 past papers and revision/Definitions Semester 1.docx.txt",
+        "Chemistry/08 EoS1 past papers and revision/Equations sheet"
+      ],
+      "topics": [
+        {
+          "id": "c-atomic",
+          "name": "Atomic structure & mass spectrometry",
+          "code": "",
+          "start": "2026-09-21",
+          "sources": [
+            "Chemistry/03 ",
+            "Chemistry/04 ",
+            "Chemistry/08 EoS1 past papers and revision/02 Topic review sheets Semester 1 2026/01 ",
+            "Chemistry/08 EoS1 past papers and revision/03 ",
+            "Chemistry/08 EoS1 past papers and revision/08 Mind Maps/01 "
+          ]
+        },
+        {
+          "id": "c-electron",
+          "name": "Electron structure & ionisation energy",
+          "code": "",
+          "start": "2026-09-28",
+          "sources": [
+            "Chemistry/05 ",
+            "Chemistry/08 EoS1 past papers and revision/02 Topic review sheets Semester 1 2026/02 ",
+            "Chemistry/08 EoS1 past papers and revision/04 ",
+            "Chemistry/08 EoS1 past papers and revision/05 "
+          ]
+        },
+        {
+          "id": "c-moles",
+          "name": "Amount of substance: moles & formulae",
+          "code": "",
+          "start": "2026-10-05",
+          "sources": [
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/01 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/02 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/03 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/04 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/05 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/06 ",
+            "Chemistry/08 EoS1 past papers and revision/02 Topic review sheets Semester 1 2026/03 ",
+            "Chemistry/08 EoS1 past papers and revision/08 Mind Maps/02 "
+          ]
+        },
+        {
+          "id": "c-titration",
+          "name": "Solutions, titrations, gases & limiting reagents",
+          "code": "",
+          "start": "2026-10-12",
+          "sources": [
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/07 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/08 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/09 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/10 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/11 ",
+            "Chemistry/06 Week 3,4,5,6 Topic Amount of substance and quantitative analysis in gases and solutions/1",
+            "Chemistry/02 Laboratory Work/03 ",
+            "Chemistry/08 EoS1 past papers and revision/02 Topic review sheets Semester 1 2026/04 ",
+            "Chemistry/08 EoS1 past papers and revision/06 "
+          ]
+        },
+        {
+          "id": "c-bonding",
+          "name": "Bonding & structure",
+          "code": "",
+          "start": "2026-10-26",
+          "sources": [
+            "Chemistry/07 ",
+            "Chemistry/08 EoS1 past papers and revision/02 Topic review sheets Semester 1 2026/05 ",
+            "Chemistry/08 EoS1 past papers and revision/07 ",
+            "Chemistry/08 EoS1 past papers and revision/08 Mind Maps/03 "
+          ]
+        },
+        {
+          "id": "c-period",
+          "name": "Periodicity",
+          "code": "",
+          "start": "2026-11-09",
+          "sources": [
+            "Chemistry/08 EoS1 past papers and revision/08 Mind Maps/04 "
+          ]
+        },
+        {
+          "id": "c-energetics",
+          "name": "Energetics & Hess's law",
+          "code": "",
+          "start": "2026-11-16",
+          "sources": []
+        },
+        {
+          "id": "c-kinetics",
+          "name": "Kinetics & rate equations",
+          "code": "",
+          "start": "2026-11-23",
+          "sources": []
+        },
+        {
+          "id": "c-equil",
+          "name": "Equilibria: Kc, Kp, Le Chatelier",
+          "code": "",
+          "start": "2026-12-07",
+          "sources": []
+        }
+      ],
+      "plan_source": "Week folders on IntoStudy (weeks 1 to 8); later weeks estimated",
+      "plan": [
+        {
+          "week": 1,
+          "topics": [
+            "c-atomic"
+          ],
+          "focus": "Atomic structure and atomic mass"
+        },
+        {
+          "week": 2,
+          "topics": [
+            "c-electron"
+          ],
+          "focus": "Electronic structure of atoms and ionisation energy"
+        },
+        {
+          "week": 3,
+          "topics": [
+            "c-moles",
+            "c-titration"
+          ],
+          "focus": "Amount of substance; quantitative analysis in gases and solutions"
+        },
+        {
+          "week": 4,
+          "topics": [
+            "c-moles",
+            "c-titration"
+          ],
+          "focus": "Amount of substance; quantitative analysis in gases and solutions"
+        },
+        {
+          "week": 5,
+          "topics": [
+            "c-moles",
+            "c-titration"
+          ],
+          "focus": "Amount of substance; quantitative analysis in gases and solutions"
+        },
+        {
+          "week": 6,
+          "topics": [
+            "c-moles",
+            "c-titration"
+          ],
+          "focus": "Amount of substance; quantitative analysis in gases and solutions"
+        },
+        {
+          "week": 7,
+          "topics": [
+            "c-bonding"
+          ],
+          "focus": "Bonding and structure"
+        },
+        {
+          "week": 8,
+          "topics": [
+            "c-bonding"
+          ],
+          "focus": "Bonding and structure"
+        },
+        {
+          "week": 9,
+          "topics": [
+            "c-period"
+          ],
+          "focus": "Periodicity",
+          "guess": true
+        },
+        {
+          "week": 10,
+          "topics": [
+            "c-energetics"
+          ],
+          "focus": "Energetics and Hess's law",
+          "guess": true
+        },
+        {
+          "week": 11,
+          "topics": [
+            "c-kinetics"
+          ],
+          "focus": "Kinetics and rate equations",
+          "guess": true
+        },
+        {
+          "week": 12,
+          "topics": [
+            "c-equil"
+          ],
+          "focus": "Equilibria",
+          "guess": true
+        },
+        {
+          "week": 13,
+          "topics": [
+            "c-equil"
+          ],
+          "focus": "Equilibria",
+          "guess": true
+        }
+      ]
+    },
+    "EAP": {
+      "shared": [
+        "EAP/02 EAP Assessment and Examinations/02 EAP Mock Examinations/EAP Exams overview for students.pdf.txt"
+      ],
+      "topics": [
+        {
+          "id": "e-sources",
+          "name": "Evaluating sources & academic integrity",
+          "code": "Week 1",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 1/",
+            "EAP/05 Additional Academic Skills Practice/03 Critical Thinking/02 ",
+            "EAP/05 Additional Academic Skills Practice/03 Critical Thinking/04 "
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-citing",
+          "name": "Paraphrasing, citing & referencing (Harvard)",
+          "code": "Week 2",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 2/*Lesson 1/",
+            "EAP/04 Teacher/*Semester 1 Week 2/*Lesson 2/",
+            "EAP/05 Additional Academic Skills Practice/06 ",
+            "EAP/01 Introduction to EAP/Reference Guide"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-style",
+          "name": "Academic style & higher-order thinking",
+          "code": "Weeks 2-3",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 2/*Lesson 3/",
+            "EAP/04 Teacher/*Semester 1 Week 3/",
+            "EAP/05 Additional Academic Skills Practice/03 Critical Thinking/01 "
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-reading",
+          "name": "Active reading & note-taking",
+          "code": "Week 4",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 4/"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-synth",
+          "name": "Summarising & synthesising sources",
+          "code": "Week 5",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 5/",
+            "EAP/05 Additional Academic Skills Practice/03 Critical Thinking/05 ",
+            "EAP/05 Additional Academic Skills Practice/02 "
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-paragraph",
+          "name": "Body paragraphs with sources",
+          "code": "Week 6",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 6/"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-writing",
+          "name": "Essay questions, introductions & using feedback",
+          "code": "Week 7",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 7/",
+            "EAP/05 Additional Academic Skills Practice/05 ",
+            "EAP/02 EAP Assessment and Examinations/EAP Writing Exam Marking Criteria"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-seminar",
+          "name": "Seminars: reading & discussion",
+          "code": "Weeks 8-9",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 8/",
+            "EAP/04 Teacher/*Semester 1 Week 9/"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-speaking",
+          "name": "Listening & presentations",
+          "code": "Weeks 10-12",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 10/",
+            "EAP/04 Teacher/*Semester 1 Week 11/",
+            "EAP/04 Teacher/*Semester 1 Week 12/",
+            "EAP/02 EAP Assessment and Examinations/Speaking",
+            "EAP/05 Additional Academic Skills Practice/04 "
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-mock",
+          "name": "Mock exams",
+          "code": "Week 13",
+          "sources": [
+            "EAP/04 Teacher/*Semester 1 Week 13/",
+            "EAP/02 EAP Assessment and Examinations/02 EAP Mock Examinations"
+          ],
+          "start": "2026-09-21"
+        },
+        {
+          "id": "e-grammar",
+          "name": "Grammar & vocabulary",
+          "code": "",
+          "start": "2026-09-15",
+          "sources": [
+            "EAP/03 ",
+            "EAP/05 Additional Academic Skills Practice/01 ",
+            "EAP/05 Additional Academic Skills Practice/02 "
+          ]
+        }
+      ],
+      "plan_source": "Teacher's weekly lessons on IntoStudy (weeks 1-8); weeks 9-13 from the EAP Semester 1 overview",
+      "plan": [
+        {
+          "week": 1,
+          "topics": [
+            "e-sources"
+          ],
+          "focus": "Introduction to EAP; evaluating sources with the CRAAP test; academic integrity"
+        },
+        {
+          "week": 2,
+          "topics": [
+            "e-citing",
+            "e-style"
+          ],
+          "focus": "Paraphrasing, summarising and citing (Harvard); reference lists; introduction to academic style"
+        },
+        {
+          "week": 3,
+          "topics": [
+            "e-style"
+          ],
+          "focus": "Higher-order thinking (Bloom's taxonomy); academic style",
+          "assessment": "Formative assessment 1: paragraph with citation and support"
+        },
+        {
+          "week": 4,
+          "topics": [
+            "e-reading"
+          ],
+          "focus": "Active reading: annotating and note-taking; vocabulary in context; reading techniques"
+        },
+        {
+          "week": 5,
+          "topics": [
+            "e-synth"
+          ],
+          "focus": "Reading into writing: analysing the question; summarising and synthesising three sources",
+          "assessment": "Formative assessment 2: reading comprehension"
+        },
+        {
+          "week": 6,
+          "topics": [
+            "e-paragraph"
+          ],
+          "focus": "Cohesive body paragraphs; incorporating sources; voice and stance"
+        },
+        {
+          "week": 7,
+          "topics": [
+            "e-writing"
+          ],
+          "focus": "Reflection on Writing Assessment 1 (feedback, error codes); analysing essay questions; introductions and thesis",
+          "assessment": "Formative assessment 3: redraft the FA1 paragraph"
+        },
+        {
+          "week": 8,
+          "topics": [
+            "e-seminar"
+          ],
+          "focus": "Introduction to seminars; reading and preparing for a seminar discussion"
+        },
+        {
+          "week": 9,
+          "topics": [
+            "e-seminar"
+          ],
+          "focus": "Reading and preparing for seminar discussion",
+          "assessment": "Formative assessment 4: seminar preparation and contributions"
+        },
+        {
+          "week": 10,
+          "topics": [
+            "e-speaking"
+          ],
+          "focus": "Academic listening and presentation skills"
+        },
+        {
+          "week": 11,
+          "topics": [
+            "e-speaking"
+          ],
+          "focus": "Academic listening and presentation skills"
+        },
+        {
+          "week": 12,
+          "topics": [
+            "e-speaking"
+          ],
+          "focus": "Presentations",
+          "assessment": "Formative assessment 5: presentation, synthesis of sources"
+        },
+        {
+          "week": 13,
+          "topics": [
+            "e-mock"
+          ],
+          "focus": "Mock exams"
+        }
+      ],
+      "plan_file": "EAP/01 Introduction to EAP/Semester 1 overview for VLE.docx",
+      "plan_note": "Weeks 1-7 are one path to an academic essay from sources: the Reading into Writing coursework (essay question + three texts → themes, summaries, plan, essay) and the Writing exam."
+    }
+  }
+}

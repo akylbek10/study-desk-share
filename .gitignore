@@ -1,0 +1,16 @@
+# secrets and sign-in cookies: never commit
+.env
+*.env
+# your own study data and course plan stay on your Mac
+study-app/data
+study-app/topics.json
+# course files from IntoStudy (downloaded by the sync)
+courses
+text
+Study packs
+# generated / local
+study-app/.venv
+__pycache__/
+*.pyc
+*.tmp
+.DS_Store
