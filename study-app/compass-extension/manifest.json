@@ -1,11 +1,25 @@
 {
   "manifest_version": 3,
   "name": "Study Desk: Compass",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reads your Compass timetable, class news and learning tasks in your own signed-in Chrome and gives them to Study Desk on this Mac. Nothing goes anywhere else.",
-  "host_permissions": ["https://*.compass.education/*", "http://127.0.0.1/*"],
-  "permissions": ["alarms", "scripting", "storage"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Study Desk: read Compass now", "default_icon": "icon128.png" },
-  "icons": { "128": "icon128.png" }
+  "host_permissions": [
+    "https://*.compass.education/*",
+    "http://127.0.0.1/*"
+  ],
+  "permissions": [
+    "alarms",
+    "scripting",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Study Desk: read Compass now",
+    "default_icon": "icon128.png"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
 }

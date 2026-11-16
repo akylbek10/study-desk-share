@@ -3932,15 +3932,19 @@ def _vtuple(v):
 def api_update(b):
     if not os.environ.get("STUDY_HOME"):
         raise ValueError("Updates are for the Study Desk app. This copy runs from a folder: use git pull.")
-    req = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
-                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "StudyDesk"})
+    # github.com/…/releases/latest redirects to …/releases/tag/vX.Y.Z (no API rate limit on shared Wi-Fi)
     try:
+        req = urllib.request.Request(f"https://github.com/{UPDATE_REPO}/releases/latest", method="HEAD",
+                                     headers={"User-Agent": "StudyDesk"})
         with urllib.request.urlopen(req, timeout=30) as r:
-            rel = json.load(r)
+            final = r.geturl()
     except urllib.error.HTTPError as e:
         raise ValueError(f"Couldn't check for updates (GitHub said {e.code}).")
-    latest = rel.get("tag_name", "").lstrip("v")
-    asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".zip")), None)
+    except urllib.error.URLError as e:
+        raise ValueError(f"Couldn't reach GitHub to check for updates: {e.reason}")
+    latest = (re.search(r"/releases/tag/v?([\d.]+)$", final) or [None, ""])[1]
+    asset = {"browser_download_url": f"https://github.com/{UPDATE_REPO}/releases/download/v{latest}/Study-Desk-{latest}.zip"} \
+        if latest else None
     newer = bool(asset) and _vtuple(latest) > _vtuple(app_version())
     if b.get("check") or not newer:
         return {"current": app_version(), "latest": latest or None, "newer": newer}
