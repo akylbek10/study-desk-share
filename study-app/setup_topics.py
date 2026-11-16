@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Draft topics.json (subjects, topics, week-by-week plan, term dates) from your own course files, with Gemini.
+"""Draft topics.json (subjects, topics, week-by-week plan, assessments, exams, breaks) from your own course files.
 
-Run it once after the first sync, when ../text has your course files:
+The setup guide runs this for you after the first IntoStudy sync. By hand:
 
-    python3 setup_topics.py                          write topics.json from the files in ../text
-    python3 setup_topics.py --timetable shot.png     also read your weekly timetable from a screenshot
-    python3 setup_topics.py --timetable shot.png     (topics.json already there: only the timetable is replaced)
+    python3 setup_topics.py                          write topics.json from your course files
     python3 setup_topics.py --force                  redo topics.json from scratch
+    python3 setup_topics.py --timetable shot.png     only read your weekly timetable from a screenshot
 
-Needs GEMINI_API_KEY in .env (Study Desk writes it there when you add the key in Settings).
-Check the result in the Programme page and fix anything odd in topics.json by hand.
+AI goes the same way as in the app: the Antigravity CLI (agy) if it is signed in, otherwise the Gemini API key.
+Check the result on the Programme page. Topics are split into subtopics later, when you open them in Learn.
 """
 import base64
 import fnmatch
@@ -17,19 +16,17 @@ import json
 import mimetypes
 import re
 import sys
-import time
-import urllib.error
-import urllib.request
 from datetime import date
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent
-TEXT = APP.parent / "text"
-OUT = APP / "topics.json"
-API = "https://generativelanguage.googleapis.com/v1beta"
-MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
-PLAN_WORDS = re.compile(r"plan|overview|scheme|schedule|syllabus|programme|program|outline|handbook|guide|calendar|key info",
-                        re.I)
+import paths
+import server                      # its gemini(): agy first, the API key as a fallback
+
+server.AGY_TIMEOUT = 1800          # the whole course in one request can take a while
+
+TEXT, OUT = paths.TEXT, paths.TOPICS
+PLAN_WORDS = re.compile(r"plan|overview|scheme|schedule|syllabus|programme|program|outline|handbook|guide|calendar|"
+                        r"key info|assessment|exam|timetable|calendar|brief|specification", re.I)
 PLAN_CHARS, PLAN_TOTAL = 40_000, 400_000
 
 S, I, B = {"type": "string"}, {"type": "integer"}, {"type": "boolean"}
@@ -37,69 +34,56 @@ arr = lambda x: {"type": "array", "items": x}
 obj = lambda req, **p: {"type": "object", "properties": p, "required": req}
 CLASS = obj(["day", "start", "end", "subject"], day=I, start=S, end=S, subject=S, code=S, room=S, teacher=S)
 TIMETABLE_SCHEMA = obj(["timetable"], timetable=arr(CLASS))
+KIND = {"type": "string", "enum": ["maths", "science", "essay", "english"]}
 SCHEMA = obj(["term", "breaks", "exams", "subjects"],
              term=obj(["name", "week1"], name=S, week1=S),
              breaks=arr(obj(["name", "start", "end"], name=S, start=S, end=S)),
              exams=arr(obj(["subject", "name", "date"], subject=S, name=S, date=S)),
-             subjects=arr(obj(["name", "plan_source", "shared", "topics", "plan"],
-                              name=S, plan_source=S, shared=arr(S),
+             subjects=arr(obj(["name", "short", "kind", "plan_source", "shared", "topics", "plan"],
+                              name=S, short=S, kind=KIND, plan_source=S, plan_file=S, shared=arr(S),
                               topics=arr(obj(["id", "code", "name", "sources"], id=S, code=S, name=S, sources=arr(S))),
-                              plan=arr(obj(["week", "topics", "focus", "guess"], week=I, topics=arr(S), focus=S, guess=B)))))
+                              plan=arr(obj(["week", "topics", "focus", "guess"], week=I, topics=arr(S), focus=S,
+                                           guess=B, assessment=S)))))
 
-RULES = """You set up a study tracker for a university foundation-year student. From the list of their course files
-(and the text of any plans/overviews among them) produce their course structure as JSON:
+RULES = """You set up a study tracker for an International Foundation Year student at INTO Manchester (NCUK). From the
+list of their course files (and the text of plans, overviews and assessment briefs among them) produce their course
+structure as JSON:
 
 - subjects: one per top-level folder of the file list, "name" EXACTLY the folder name. Skip folders that are not a
-  taught subject (welcome, student services, wellbeing...).
+  taught subject (welcome, student services, wellbeing, library, careers...).
+  short: a short label for small spaces (e.g. "Maths" for "Technical Maths", "Business" for "Business Studies").
+  kind: "maths" (maths, statistics), "science" (physics, chemistry, biology, computing, engineering), "english"
+  (English for Academic Purposes and other English language/skills subjects) or "essay" (subjects assessed through
+  writing: business, sociology, global studies, economics, law, politics, history, psychology...).
 - topics: the subject's real taught topics in teaching order, 6-15 per subject. id = short lowercase slug with a
-  subject prefix letter ("p-momentum", "m-logs"), unique. code = the module/unit code used in the files if any
-  (e.g. "AC1", "C3"), else a short label. name = a clear topic name a student would recognise.
+  subject prefix ("p-momentum", "b-marketing", "s-family"), unique across all subjects. code = the module/unit code
+  used in the files if any (e.g. "AC1", "Unit 3"), else a short label. name = a clear topic name a student would
+  recognise. For an English skills subject, a topic is a skill block or the week's theme (e.g. "Paraphrasing and
+  citing", "Seminar skills"), in the order taught.
 - sources: path prefixes from the file list that hold that topic's files, e.g. "Physics/05 AC1" (a folder) or a
   full file path. Every prefix MUST be the start of at least one listed path. A "*" works as a wildcard
   ("EAP/04 Teacher/*Week 3/") when folder numbers vary. Cover as many files as you can; each file belongs to the
   topic it teaches.
-- shared: prefixes of files useful for every topic of the subject (formula sheet, data booklet, past papers).
+- shared: prefixes of files useful for every topic of the subject (formula sheet, data booklet, past papers,
+  module handbook, essay-writing guide, marking criteria).
 - plan: teaching weeks 1..N of this semester with the topic ids taught each week and a one-line focus. Take it from
   the plans/overviews/week folders when they exist (guess=false); where nothing says it, estimate from the topic
-  order (guess=true). plan_source says where the plan came from in a few words.
+  order (guess=true). Put any assessment that happens in that week in "assessment" (coursework deadline, essay,
+  presentation, test, quiz, formative assessment), with its name as the files give it, e.g. "Formative
+  assessment 2: reading comprehension" or "Report deadline (30%)". plan_source says where the plan came from in a
+  few words; plan_file is the path of the main plan file if there is one.
 - term: name (e.g. "Semester 1") and week1 = the Monday of teaching week 1 (YYYY-MM-DD), from the files; if not
   stated, the most likely Monday given today's date.
-- breaks (holidays) and exams (end-of-semester exams/tests with dates) only if the files state them.
+- breaks (holidays, reading weeks) and exams (end-of-semester exams with dates) only if the files state them.
 Use only what the files show; never invent teachers, codes or dates that are not in them."""
 
 
-def api_key():
-    for line in (APP / ".env").read_text().splitlines() if (APP / ".env").exists() else []:
-        if line.startswith("GEMINI_API_KEY="):
-            return line.split("=", 1)[1].strip()
-    sys.exit("No Gemini key: start Study Desk, add your key in Settings, then run this again.")
-
-
-def gemini(parts, schema):
-    body = {"contents": [{"role": "user", "parts": parts}], "systemInstruction": {"parts": [{"text": RULES}]},
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 32000, "responseMimeType": "application/json",
-                                 "responseSchema": schema, "thinkingConfig": {"thinkingLevel": "high"}}}
-    err = ""
-    for attempt, model in enumerate(MODELS * 2):          # second round after a pause: 503 "high demand" passes
-        if attempt == len(MODELS):
-            print("   all busy, waiting 30 s…")
-            time.sleep(30)
-        req = urllib.request.Request(f"{API}/models/{model}:generateContent", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", "x-goog-api-key": api_key()})
-        try:
-            with urllib.request.urlopen(req, timeout=300) as r:
-                out = json.load(r)
-            return json.loads(out["candidates"][0]["content"]["parts"][-1]["text"])
-        except urllib.error.HTTPError as e:
-            try:
-                msg = json.load(e)["error"]["message"].split("\n")[0][:160]
-            except Exception:
-                msg = ""
-            err = f"{model}: error {e.code} {msg}"
-        except (KeyError, IndexError, ValueError, TimeoutError, urllib.error.URLError) as e:
-            err = f"{model}: {type(e).__name__} {e}"
-        print("  ", err, "- trying the next model")
-    sys.exit("Gemini failed: " + err)
+def ask(parts, schema):
+    contents = [{"role": "user", "parts": parts}]
+    try:
+        return server.gemini(contents, RULES, schema, 0.2)
+    except server.GeminiError as e:
+        sys.exit(f"The AI didn't answer: {e}")
 
 
 def matches(path, prefix):
@@ -108,42 +92,42 @@ def matches(path, prefix):
 
 def image_part(path):
     p = Path(path)
-    return {"inline_data": {"mime_type": mimetypes.guess_type(p.name)[0] or "image/png",
-                            "data": base64.b64encode(p.read_bytes()).decode()}}
+    return {"inlineData": {"mimeType": mimetypes.guess_type(p.name)[0] or "image/png",
+                           "data": base64.b64encode(p.read_bytes()).decode()}}
 
 
 def read_timetable(path, subjects):
-    print("Reading the timetable screenshot…")
-    r = gemini([image_part(path), {"text": "This is the student's weekly class timetable. List every weekly class: "
-                f"day 1=Monday..5=Friday, start/end HH:MM, subject = one of {subjects} (the closest match), "
-                "plus course code, room and teacher if shown."}], TIMETABLE_SCHEMA)
+    print("Reading the timetable screenshot…", flush=True)
+    r = ask([{"text": "This is the student's weekly class timetable. List every weekly class: "
+              f"day 1=Monday..5=Friday, start/end HH:MM, subject = one of {subjects} (the closest match), "
+              "plus course code, room and teacher if shown."}, image_part(path)], TIMETABLE_SCHEMA)
     return [c for c in r["timetable"] if c["subject"] in subjects]
 
 
 def main():
     args = sys.argv[1:]
     shot = args[args.index("--timetable") + 1] if "--timetable" in args else None
-    if OUT.exists() and "--force" not in args:
+    old = json.loads(OUT.read_text()) if OUT.exists() else {}
+    if old.get("subjects") and "--force" not in args:
         if not shot:
             sys.exit(f"{OUT.name} already exists. Use --force to redo it, or --timetable <screenshot> to add classes.")
-        cfg = json.loads(OUT.read_text())
-        cfg["timetable"] = read_timetable(shot, list(cfg["subjects"]))
-        OUT.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-        return print(f"Timetable updated: {len(cfg['timetable'])} weekly classes.")
+        old["timetable"] = read_timetable(shot, list(old["subjects"]))
+        OUT.write_text(json.dumps(old, ensure_ascii=False, indent=2))
+        return print(f"Timetable updated: {len(old['timetable'])} weekly classes.")
 
     files = sorted(str(p.relative_to(TEXT)).removesuffix(".txt") for p in TEXT.rglob("*.txt")) if TEXT.exists() else []
     if not files:
-        sys.exit("No course files in ../text yet. Start Study Desk, sign in to IntoStudy and let the first sync finish.")
+        sys.exit("No course files yet. Connect IntoStudy in the setup guide and let the first sync finish.")
     plans, total = [], 0
     for f in files:
         if PLAN_WORDS.search(Path(f).name) and total < PLAN_TOTAL:
             t = (TEXT / (f + ".txt")).read_text(errors="ignore")[:PLAN_CHARS]
             plans.append(f"=== {f} ===\n{t}")
             total += len(t)
-    print(f"{len(files)} course files, {len(plans)} plan/overview files. Asking Gemini (takes a minute or two)…")
+    print(f"{len(files)} course files, {len(plans)} plan/overview files. Asking the AI (takes a few minutes)…", flush=True)
     prompt = (f"Today is {date.today().isoformat()}.\n\nCOURSE FILES ({len(files)}):\n" + "\n".join(files) +
-              "\n\nPLANS AND OVERVIEWS:\n" + ("\n\n".join(plans) or "(none found)"))
-    r = gemini([{"text": prompt}], SCHEMA)
+              "\n\nPLANS, OVERVIEWS AND ASSESSMENT BRIEFS:\n" + ("\n\n".join(plans) or "(none found)"))
+    r = ask([{"text": prompt}], SCHEMA)
 
     subjects, dropped = {}, []
     folders = {f.split("/")[0] for f in files}
@@ -159,28 +143,41 @@ def main():
         ids = {t["id"] for t in s["topics"]}
         for w in s["plan"]:
             w["topics"] = [i for i in w["topics"] if i in ids]
-            if not w["guess"]:
-                del w["guess"]
-        name = s.pop("name")
-        subjects[name] = {"shared": s["shared"], "plan_source": s["plan_source"], "topics": s["topics"], "plan": s["plan"]}
+            if not w.get("guess"):
+                w.pop("guess", None)
+            if not str(w.get("assessment") or "").strip():
+                w.pop("assessment", None)
+        entry = {"short": s.get("short") or s["name"], "kind": s.get("kind") or "essay", "shared": s["shared"],
+                 "plan_source": s["plan_source"], "topics": s["topics"], "plan": s["plan"]}
+        if s.get("plan_file") and s["plan_file"] in files:
+            entry["plan_file"] = s["plan_file"]
+        if entry["kind"] == "english":
+            entry["english"] = True                # English skills subject (EAP): no figures or calculations
+        subjects[s["name"]] = entry
 
-    cfg = {"_note": "Drafted by setup_topics.py from the course files. 'sources' are path prefixes inside ../text "
-                    "('*' = wildcard); 'shared' files go with every topic of the subject; 'plan' is the weekly plan.",
-           "term": r["term"], "breaks": r["breaks"], "exams": r["exams"],
-           "timetable": read_timetable(shot, list(subjects)) if shot else [], "subjects": subjects}
+    cfg = {"_note": "Drafted by setup_topics.py from the course files. 'sources' are path prefixes inside text/ "
+                    "('*' = wildcard); 'shared' files go with every topic of the subject; 'plan' is the weekly plan; "
+                    "'kind' (maths, science, essay, english) decides how questions and notes are written.",
+           "term": r["term"], "breaks": r["breaks"],
+           "exams": [e for e in r["exams"] if re.fullmatch(r"\d{4}-\d{2}-\d{2}", e.get("date", ""))],
+           "timetable": read_timetable(shot, list(subjects)) if shot else old.get("timetable", []),
+           "subjects": subjects}
+    for k in ("intostudy_courses",):           # keep what the setup guide already chose
+        if old.get(k):
+            cfg[k] = old[k]
     OUT.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
     covered = {f for s in subjects.values() for t in s["topics"] for f in files
                if any(matches(f, p) for p in t["sources"] + s["shared"])}
     print(f"\nWrote {OUT.name}: term week 1 = {cfg['term']['week1']}")
     for n, s in subjects.items():
-        print(f"  {n}: {len(s['topics'])} topics, {len(s['plan'])} weeks planned")
+        ass = sum(1 for w in s["plan"] if w.get("assessment"))
+        print(f"  {n} ({s['kind']}): {len(s['topics'])} topics, {len(s['plan'])} weeks planned, {ass} assessments")
+    print(f"  {len(cfg['exams'])} exams, {len(cfg['breaks'])} breaks")
     print(f"  {len(covered)} of {len(files)} files are linked to a topic"
-          f"{'; the rest you can sort in Course files' if len(covered) < len(files) else ''}.")
+          f"{'; the rest are sorted by the AI in the background' if len(covered) < len(files) else ''}.")
     if dropped:
         print("  Ignored (did not match any file): " + "; ".join(dropped[:15]))
-    if not shot:
-        print("\nAdd your classes later with:  python3 setup_topics.py --timetable <screenshot of your timetable>")
 
 
 if __name__ == "__main__":

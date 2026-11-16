@@ -3,6 +3,7 @@
 
     .venv/bin/python sync.py          check every course, download what is new or changed, extract text
     .venv/bin/python sync.py login    open a Chrome window so you can sign in once (Microsoft SSO)
+    .venv/bin/python sync.py courses  list the courses you are enrolled in (data/courses_found.json), to pick from
 
 Uses its own Chrome profile in data/browser-profile, so your sign-in is kept between runs; no password is
 ever stored by Study Desk. Files keep the same folder layout as browser_download.js (courses/<Course>/NN Module/...).
@@ -14,18 +15,18 @@ import re
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
+import paths
 
-APP = Path(__file__).resolve().parent
-ROOT = APP.parent
-COURSES_DIR, TEXT_DIR = ROOT / "courses", ROOT / "text"
-DATA = APP / "data"
+APP = paths.APP
+COURSES_DIR, TEXT_DIR = paths.COURSES, paths.TEXT
+DATA = paths.DATA
 PROFILE = DATA / "browser-profile"
 STATUS, MANIFEST, LOG = DATA / "sync_status.json", DATA / "sync_manifest.json", DATA / "sync_log.json"
 
 SITE = "https://man.intostudy.com"
 API_VER = "1.100"
-COURSES_FILE = DATA / "courses.json"   # {org unit id: course name}; found on the first sync, edit to drop a course
+COURSES_FILE = DATA / "courses.json"   # {org unit id: course name}; ticked in the setup guide (or found on the first sync)
+FOUND_FILE = DATA / "courses_found.json"
 SKIP = {"mp4", "mov", "m4v", "avi", "webm"}
 
 
@@ -131,8 +132,12 @@ class Orphans:
 def browser(p, headless):
     PROFILE.mkdir(parents=True, exist_ok=True)
     opts = dict(user_data_dir=str(PROFILE), headless=headless, accept_downloads=False,
-                viewport={"width": 1100, "height": 800})
-    return p.chromium.launch_persistent_context(channel="chrome", **opts)   # the Chrome already on this Mac
+                viewport={"width": 1100, "height": 800},
+                chromium_sandbox=True)   # Chrome's normal sandbox (Playwright turns it off by default)
+    try:
+        return p.chromium.launch_persistent_context(channel="chrome", **opts)   # the Chrome already on this Mac
+    except Exception:
+        return p.chromium.launch_persistent_context(**opts)                     # no Chrome: Playwright's Chromium
 
 
 def pause(ctx, ms):
@@ -214,19 +219,22 @@ def login():
             ctx.close()
         except Exception:
             pass
-    if ok:
+    if ok and not chosen():
+        status(state="idle", step="Signed in. Finding your courses…", signed_in=True)
+        list_courses()
+    elif ok:
         status(state="idle", step="Signed in. Checking for new files…", signed_in=True)
         sync()
     else:
         status(state="login", step="Not signed in. Press “Sign in” and finish signing in within 10 minutes.", signed_in=False)
 
 
-def courses(req):
-    """Courses to fetch: topics.json "intostudy_courses", else data/courses.json, else the courses this
-    account is enrolled in on IntoStudy (saved to data/courses.json so you can remove any you don't want)."""
-    cfg = load(APP / "topics.json", {}).get("intostudy_courses") or load(COURSES_FILE, {})
-    if cfg:
-        return {int(k): v for k, v in cfg.items()}
+def chosen():
+    return load(paths.TOPICS, {}).get("intostudy_courses") or load(COURSES_FILE, {})
+
+
+def enrolled(req):
+    """{org unit id: (name, looks like a subject)} for every course this account can open."""
     lp = max((v["LatestVersion"] for v in req.get(f"{SITE}/d2l/api/versions/").json() if v["ProductCode"] == "lp"),
              key=lambda s: tuple(map(int, s.split("."))))
     found, bookmark = {}, ""
@@ -238,9 +246,40 @@ def courses(req):
         if not r.get("PagingInfo", {}).get("HasMoreItems"):
             break
         bookmark = r["PagingInfo"]["Bookmark"]
-    intake = re.compile(r"\s+-\s+[A-Z][a-z]+\.? \d{4}$")   # subject courses are named "Physics - Sept 2026"
-    if any(intake.search(n) for n in found.values()):           # skip "Student Services", "Welcome to ..." etc.
-        found = {k: intake.sub("", n) for k, n in found.items() if intake.search(n)}
+    return found
+
+
+INTAKE = re.compile(r"\s+-\s+[A-Z][a-z]+\.? \d{4}$")   # subject courses are named "Physics - Sept 2026"
+
+
+def list_courses():
+    """For the setup guide: every enrolled course, with the likely subject courses ticked."""
+    from playwright.sync_api import sync_playwright
+    status(state="running", step="Finding your courses on IntoStudy…", error=None)
+    with sync_playwright() as p:
+        ctx = browser(p, headless=True)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        if not signed_in(page):
+            ctx.close()
+            status(state="login", step="Sign in to IntoStudy first.", signed_in=False, finished=now())
+            return
+        found = enrolled(ctx.request)
+        ctx.close()
+    subj = any(INTAKE.search(n) for n in found.values())
+    save(FOUND_FILE, {str(k): {"name": INTAKE.sub("", n), "full": n, "suggested": bool(INTAKE.search(n)) or not subj}
+                      for k, n in found.items()})
+    status(state="choose", step=f"Found {len(found)} courses. Tick yours in the setup guide.", signed_in=True, finished=now())
+
+
+def courses(req):
+    """Courses to fetch: topics.json "intostudy_courses", else data/courses.json, else the courses this
+    account is enrolled in on IntoStudy (saved to data/courses.json so you can remove any you don't want)."""
+    cfg = chosen()
+    if cfg:
+        return {int(k): v for k, v in cfg.items()}
+    found = enrolled(req)
+    if any(INTAKE.search(n) for n in found.values()):           # skip "Student Services", "Welcome to ..." etc.
+        found = {k: INTAKE.sub("", n) for k, n in found.items() if INTAKE.search(n)}
     save(COURSES_FILE, found)
     return found
 
@@ -312,7 +351,6 @@ def sync():
 
     if added or updated:
         status(step="Turning new files into text…")
-        sys.path.insert(0, str(ROOT))
         import extract_text
         extract_text.main()
         log = load(LOG, [])
@@ -328,9 +366,9 @@ def sync():
 
 
 if __name__ == "__main__":
-    DATA.mkdir(exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
     try:
-        login() if sys.argv[1:] == ["login"] else sync()
+        {"login": login, "courses": list_courses}.get((sys.argv[1:] or [""])[0], sync)()
     except Exception as e:
         status(state="error", step="The check failed.", error=f"{type(e).__name__}: {e}"[:500], finished=now())
         raise

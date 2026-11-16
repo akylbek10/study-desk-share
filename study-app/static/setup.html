@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Set up Study Desk</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%232445C8'/><path d='M9 22.5 20.5 11a2.1 2.1 0 0 1 3 3L12 25.5l-4 1z' fill='none' stroke='white' stroke-width='2.4' stroke-linejoin='round'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650;12..96,750&family=Onest:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="app.css">
+<script>
+  var t = "auto";
+  try { t = JSON.parse(localStorage.getItem("theme")) || t; } catch (e) {}
+  if (t !== "auto") document.documentElement.dataset.theme = t;
+</script>
+<style>
+  body { background: var(--paper); color: var(--ink); }
+  .su { max-width: 760px; margin: 0 auto; padding: 40px 16px 80px; }
+  .su h1 { font-family: var(--font-display); font-size: clamp(28px, 5vw, 40px); margin: 0 0 6px; letter-spacing: -.01em; }
+  .su .lede { color: var(--ink-2); margin: 0 0 28px; max-width: 60ch; }
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+  .step { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--r-lg); padding: 18px 20px; }
+  .step-head { display: flex; gap: 14px; align-items: center; cursor: pointer; }
+  .step-num { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 700;
+    background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--rule-strong); }
+  .step.done .step-num { background: var(--green); border-color: var(--green); color: var(--surface); }
+  .step.current { border-color: var(--pen); box-shadow: 0 0 0 1px var(--pen) inset; }
+  .step-title { font-weight: 650; font-size: 17px; }
+  .step-sub { color: var(--ink-3); font-size: 14px; }
+  .step-body { margin: 14px 0 0 46px; display: grid; gap: 12px; }
+  .step:not(.open) .step-body { display: none; }
+  .step-body p { margin: 0; color: var(--ink-2); line-height: 1.55; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .su input[type=text], .su input[type=password] { font: inherit; padding: 10px 12px; border-radius: var(--r-md); border: 1px solid var(--rule-strong);
+    background: var(--surface); color: var(--ink); min-width: 0; flex: 1 1 220px; }
+  .state { font-size: 14px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-2); white-space: pre-wrap; }
+  .state.ok { background: var(--green-soft); color: var(--green); }
+  .state.bad { background: var(--red-soft); color: var(--red); }
+  .courses { display: grid; gap: 6px; }
+  .courses label { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-2); }
+  .log { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 180px; overflow: auto; }
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 14px; }
+  .finish { margin-top: 26px; display: flex; gap: 10px; flex-wrap: wrap; }
+  @media (max-width: 560px) { .step-body { margin-left: 0; } }
+</style>
+</head>
+<body>
+<main class="su">
+  <h1>Set up Study Desk</h1>
+  <p class="lede">Five steps, about 20 minutes, most of it waiting for downloads. You sign in to each service yourself in its own window: Study Desk never sees or stores your passwords. You can close this page and come back to it at <a href="/setup">this address</a>.</p>
+  <ol class="steps" id="steps"></ol>
+  <div class="finish" id="finish"></div>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="setup.js"></script>
+</body>
+</html>

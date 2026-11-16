@@ -28,7 +28,7 @@ function progressRow(t, { pill = true } = {}) {
     <div class="pr-side">${statusTag(t)}
       ${t.status === "confirmed" ? "" : `<a class="btn sm ${t.status === "studied" ? "primary" : ""}" href="#/topic/${t.id}/check">Check</a>`}
       <a class="btn sm" href="#/topic/${t.id}/review">Review</a>
-      <button class="btn sm" type="button" data-gemini="${t.id}" aria-label="Study ${esc(t.name)} in Gemini">${icon("sparkles")}Gemini</button>
+      <a class="btn sm" href="#/learn/${t.id}" aria-label="Learn ${esc(t.name)}">${icon("layers")}Learn</a>
     </div>
   </div>`;
 }
@@ -74,15 +74,15 @@ function doNextHTML() {
     for (const c of classesOn(iso)) {
       const t = classTopic(c.subject, iso);
       if (t && t.status === "none" && !steps.some(x => x.tid === t.id) && (iso !== S.today || toMin(c.start) > nowMin()))
-        steps.push({ tid: t.id, what: `Before ${iso === S.today ? "today's" : "tomorrow's"} ${SHORT[c.subject]} class: ${t.name}`, why: `${c.start}, room ${c.room}. Go through it in Gemini first, then tick it.`, gem: t.id, cta: "Study in Gemini" });
+        steps.push({ tid: t.id, what: `Before ${iso === S.today ? "today's" : "tomorrow's"} ${SHORT[c.subject]} class: ${t.name}`, why: `${c.start}, room ${c.room}. Go through it in Learn first.`, href: `#/learn/${t.id}`, cta: "Learn it" });
     }
   }
   if (s.toConfirm[0]) { const t = s.toConfirm[s.toConfirm.length - 1]; steps.push({ what: `Confirm ${t.name}`, why: `You studied it ${t.studied_on ? relDay(t.studied_on) : ""} but haven't proved it yet. ${S.pass_mark}% in an 8-question check confirms it.`, href: `#/topic/${t.id}/check`, cta: "Take the check" }); }
-  if (!untouched && s.behind[0]) { const t = s.behind[0]; steps.push({ what: `Catch up: ${t.name}`, why: `${SHORT[t.subject]}, taught in ${weeksLabel(t).toLowerCase()}. ${plural(s.behind.length, "topic")} behind in total.`, gem: t.id, cta: "Study in Gemini" }); }
+  if (!untouched && s.behind[0]) { const t = s.behind[0]; steps.push({ what: `Catch up: ${t.name}`, why: `${SHORT[t.subject]}, taught in ${weeksLabel(t).toLowerCase()}. ${plural(s.behind.length, "topic")} behind in total.`, href: `#/learn/${t.id}`, cta: "Learn it" }); }
   if (S.due_total) steps.push({ what: `Review ${plural(S.due_total, "flashcard")}`, why: `Due today. About ${Math.max(1, Math.round(S.due_total * 12 / 60))} min.`, href: "#/review", cta: "Start review" });
   if (!steps.length) return `<div class="rows empty-note"><b>You're up to date</b>Nothing behind and nothing waiting for a check.</div>`;
   return `<ol class="plan rows">${steps.slice(0, 4).map(x => `<li><div><div class="what">${esc(x.what)}</div><div class="why">${esc(x.why)}</div></div>${
-    x.gem ? `<button class="btn sm" type="button" data-gemini="${x.gem}">${icon("sparkles")}${x.cta}</button>` : `<a class="btn sm" href="${x.href}">${esc(x.cta)}</a>`}</li>`).join("")}</ol>`;
+    `<a class="btn sm" href="${x.href}">${esc(x.cta)}</a>`}</li>`).join("")}</ol>`;
 }
 
 /* Today: assessments and exams with how ready you are */
@@ -114,7 +114,7 @@ function renderProgress() {
   view.innerHTML = `
     <div class="page-head"><div>
       <h1>Progress</h1>
-      <p class="sub">You learn in Gemini; this page keeps score. Tick a topic when you have studied it, then confirm it with an 8-question check (${S.pass_mark}% to pass). Topics whose class weeks are over and are not ticked count as behind.</p>
+      <p class="sub">This page keeps score. Learn a topic (Learn mode or in class), tick it when you have studied it, then confirm it with an 8-question check (${S.pass_mark}% to pass). Topics whose class weeks are over and are not ticked count as behind.</p>
     </div></div>
     ${untouched ? `<div class="notice">${icon("info")}<div><b>Start here: tick what you already know from class.</b><br>Nothing is ticked yet, so every finished topic shows as behind. Tick the ones you have studied; leave the ones you really haven't.</div></div>` : ""}
     ${standStatsHTML()}
@@ -136,15 +136,16 @@ function paneCheck(t) {
         <p class="muted">${t.status === "confirmed" ? `You confirmed ${esc(t.name)} ${relDay(t.confirmed_on)}. You can take another check any time.` : `8 questions over the whole of <b>${esc(t.name)}</b>, written from your course files and checked twice. Score ${S.pass_mark}% or more and the topic is confirmed.`}${t.check_best != null ? ` Best so far: ${t.check_best}%.` : ""}</p>
         <div class="step-actions">
           <button class="btn primary" type="button" id="check-start">${icon("target")}${t.checks ? "Take another check" : "Start the check"}</button>
-          <button class="btn" type="button" data-gemini="${t.id}">${icon("sparkles")}Study it in Gemini first</button>
+          <a class="btn" href="#/learn/${t.id}">${icon("layers")}Learn it first</a>
           ${t.status === "confirmed" ? "" : `<button class="btn quiet" type="button" data-mark="${t.id}" data-on="${t.status !== "none" ? 1 : 0}">${t.status !== "none" ? "Untick studied" : "Just tick as studied"}</button>`}
         </div>
-        <p class="small muted" style="margin-top:12px">Writing the questions takes about a minute. A score from Gemini's own final test (saved in the Study in Gemini window) also confirms the topic at ${S.pass_mark}%.</p>
+        <p class="small muted" style="margin-top:12px">Writing the questions takes about a minute.</p>
       </div>`;
     $("#check-start").onclick = async e => {
-      busy(e.currentTarget, true, "Writing questions");
+      const btn = e.currentTarget;
+      busy(btn, true, "Writing questions");
       try { const { questions } = await api("/api/check/test", { topic: t.id }); if (current.topic === t.id) run(questions); }
-      catch (err) { toast(err.message); busy(e.currentTarget, false); }
+      catch (err) { toast(err.message); busy(btn, false); }
     };
   };
   const run = qs => {
@@ -169,12 +170,16 @@ function paneCheck(t) {
           </div>
         </div>`;
     };
+    let sending = false;
     const submit = async () => {
+      if (sending) return;
       const left = picked.filter(x => x == null).length;
       if (left && !confirm(`${plural(left, "question")} not answered. Unanswered questions count as wrong. Submit anyway?`)) return;
       const correct = qs.filter((q, j) => picked[j] === q.answer_index).length;
       let res;
+      sending = true;
       try { res = await api("/api/check/submit", { topic: t.id, total: qs.length, correct }); } catch (e) { toast(e.message); return; }
+      finally { sending = false; }
       current.keys = null; pane.onclick = null;
       results(qs, picked, res);
       refresh();
@@ -199,11 +204,11 @@ function paneCheck(t) {
       <section class="result-hero ${res.passed ? "good" : "bad"}">
         <div class="big">${res.pct}%</div>
         <div><h2>${res.passed ? (res.newly_confirmed ? "Confirmed. You know this topic." : "Passed again.") : `Not yet. You need ${res.pass_mark}%.`}</h2>
-          <p>${qs.length - wrong.length} of ${qs.length} correct. ${res.passed ? "It now counts toward your exam readiness." : "Go through the mistakes below, study those parts in Gemini, then try again."}</p>
+          <p>${qs.length - wrong.length} of ${qs.length} correct. ${res.passed ? "It now counts toward your exam readiness." : "Go through the mistakes below, learn those parts again, then try again."}</p>
           <div class="step-actions">
             <button class="btn ${res.passed ? "" : "primary"}" type="button" id="again">${res.passed ? "Take another check" : "Try again"}</button>
             ${wrong.length ? `<button class="btn" type="button" id="to-cards">${icon("cards")}Make ${plural(wrong.length, "flashcard")} from mistakes</button>` : ""}
-            ${res.passed ? `<a class="btn" href="#/progress">Back to Progress</a>` : `<button class="btn" type="button" data-gemini="${t.id}">${icon("sparkles")}Study in Gemini</button>`}
+            ${res.passed ? `<a class="btn" href="#/progress">Back to Progress</a>` : `<a class="btn" href="#/learn/${t.id}">${icon("layers")}Learn it</a>`}
           </div></div>
       </section>
       ${wrong.length ? `<section class="section"><div class="section-head"><h2>Your mistakes</h2></div>${wrong.map(({ q, j }) => `
@@ -236,13 +241,13 @@ async function paneReview(t) {
           ${r.stale ? ` <b class="warn">New files arrived since then.</b>` : ""}</p>
         <div class="step-actions" style="margin:0">
           ${r.md ? `<button class="btn sm" type="button" id="rv-refresh">${icon("refresh")}${r.stale ? "Update with the new files" : "Write again"}</button>` : ""}
-          <button class="btn sm" type="button" data-gemini="${t.id}">${icon("sparkles")}Study in Gemini</button>
+          <a class="btn sm" href="#/learn/${t.id}">${icon("layers")}Learn</a>
           <a class="btn sm" href="#/topic/${t.id}/check">${icon("target")}Check</a>
         </div>
       </div>
       ${r.md ? `<article class="panel pad md review-sheet">${md(r.md)}</article>` : `<div class="rows empty-note"><b>No review notes yet</b>${S.has_key ? "They couldn't be written just now. Try again." : "Connect Gemini in Settings first."}<div style="margin-top:10px"><button class="btn sm primary" type="button" id="rv-refresh">Write the review notes</button></div></div>`}
       <section class="section">
-        <div class="section-head"><h2>Your own notes</h2><p>Paste the “Notes for Study Desk” block Gemini gives at the end of a session. They show here and in Telegram.</p></div>
+        <div class="section-head"><h2>Your own notes</h2><p>Anything you want to remember about this topic${S.telegram ? ". They show here and in Telegram" : ""}.</p></div>
         <textarea id="rv-mine" rows="${Math.min(14, Math.max(5, (r.mine || "").split("\n").length + 1))}" placeholder="What you learned, your mistakes, things to remember…">${esc(r.mine || "")}</textarea>
         <div class="step-actions"><button class="btn" type="button" id="rv-save">Save my notes</button><span class="muted small" id="rv-saved"></span></div>
       </section>`;
@@ -267,9 +272,9 @@ const WHEN_EN = w => w.replace("ПРОСРОЧЕНО, было", "overdue, was")
 function tasksHTML() {
   const tasks = S.tasks || [], open = tasks.filter(t => !t.done);
   return `<section class="section" aria-labelledby="tasks-h">
-    <div class="section-head"><h2 id="tasks-h">Tasks${open.length ? ` <span class="muted">${open.length}</span>` : ""}</h2><p>Small things from teachers. Add them here or just write them to the agent in Telegram; you get a reminder the evening before the class.</p></div>
+    <div class="section-head"><h2 id="tasks-h">Tasks${open.length ? ` <span class="muted">${open.length}</span>` : ""}</h2><p>${S.telegram ? "Small things from teachers. Add them here or just write them to the agent in Telegram; you get a reminder the evening before the class." : "Small things from teachers, homework and deadlines (Compass tasks appear here by themselves)."}</p></div>
     <form class="task-add" id="task-form"><label class="sr" for="task-text">New task</label>
-      <input type="text" id="task-text" placeholder="e.g. Physics: finish Hwk10 for the next lesson" autocomplete="off">
+      <input type="text" id="task-text" placeholder="e.g. ${esc(S.subjects[0]?.short || "Maths")}: finish the homework for the next lesson" autocomplete="off">
       <button class="btn" type="submit">Add</button></form>
     ${tasks.length ? `<div class="rows">${tasks.map(t => `
       <div class="pr-row task ${t.done ? "done" : ""} ${t.overdue ? "late" : ""}">

@@ -9,11 +9,42 @@ function topicOptions(subject, selected) {
 const fileName = p => p.split("/").pop().replace(/\.txt$/, "");
 const fileFolder = p => p.split("/").slice(1, -1).map(x => x.replace(/^\d+\s+/, "")).join(" / ");
 
+/* File search: by name or by words inside. scope is {topic}, {subject} or {} for every file.
+   While there's a query the results replace the page body; idle(true) puts the normal content back. */
+const markWords = (text, words) => words.reduce((h, w) => h.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>"), esc(text));
+const topicLabel = id => id === "general" ? "Whole subject" : (topicById(id)?.name || "No topic");
+const fileSearchHTML = (id, placeholder) => `<div class="file-search"><label class="sr" for="${id}">${esc(placeholder)}</label>
+  <input type="search" id="${id}" placeholder="${esc(placeholder)}" autocomplete="off"><span class="muted small" id="${id}-note"></span></div>`;
+const fileHitHTML = (r, words) => `<a class="file" href="${fileHref(r.path)}"><span class="ext">${esc((r.name.split(".").pop() || "").toUpperCase())}</span>
+  <span class="name">${esc(r.name.replace(/\.[^.]+$/, ""))}<span class="file-hit">${r.in_name ? "in the name" : `${r.hits}× in the text`} · ${esc(topicLabel(r.topic))}${r.folder ? ` · ${esc(r.folder)}` : ""}</span>${r.snippet && !r.in_name ? `<span class="file-snip">…${markWords(r.snippet, words)}…</span>` : ""}</span>${icon("chevronRight")}</a>`;
+
+function wireFileSearch(id, scope, out, idle, row = fileHitHTML, after = () => {}) {
+  const note = $(`#${id}-note`);
+  let timer, seq = 0;
+  $(`#${id}`).addEventListener("input", e => {
+    clearTimeout(timer);
+    const q = e.target.value.trim();
+    if (q.length < 2) { seq++; note.textContent = ""; out.hidden = true; out.innerHTML = ""; idle(true); return; }
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      try {
+        const { results, words } = await api("/api/topic/search", { ...scope, q });
+        if (mine !== seq) return;                       // a newer search is already on its way
+        note.textContent = results.length ? `${plural(results.length, "file")} found${results.length === 40 ? " (showing the first 40)" : ""}` : "";
+        out.innerHTML = results.length
+          ? `<div class="rows">${results.map(r => row(r, words)).join("")}</div>`
+          : `<div class="rows empty-note"><b>Nothing found for “${esc(q)}”</b>Try one word, or a word from the file's name. Scanned files have no text to search.</div>`;
+        out.hidden = false; idle(false); after(out);
+      } catch (err) { toast(err.message); }
+    }, 180);
+  });
+}
+
 async function renderFilesCheck() {
   setNav("files", "Files check");
   view.innerHTML = `<div class="page-head"><div><h1>Files check</h1><p class="sub">Loading…</p></div></div>`;
   const d = await api("/api/files/check");
-  const tname = id => id === "general" ? "Whole subject" : (topicById(id)?.name || "No topic");
+  const tname = topicLabel;
   const check = d.rows.filter(r => r.by === null || (r.by === "ai" && r.confidence !== "high"));
   const ai = d.rows.filter(r => r.by === "ai");
   const mine = d.rows.filter(r => r.by === "you");
@@ -27,11 +58,21 @@ async function renderFilesCheck() {
   const row = r => `
     <div class="fc-row" data-path="${esc(r.path)}">
       <div class="fc-main">
-        <div class="row-title">${subjPill(r.subject)}<a href="/file?p=${encodeURIComponent(r.path)}" target="_blank" rel="noopener">${esc(fileName(r.path))}</a></div>
+        <div class="row-title">${subjPill(r.subject)}<a href="${fileHref(r.path)}">${esc(fileName(r.path))}</a></div>
         <div class="row-meta"><span>${esc(fileFolder(r.path))}</span>${(r.also || []).length ? `<span>also in ${r.also.map(id => esc(topicById(id)?.name || id)).join(", ")}</span>` : ""}${r.by === "ai" ? `<span>sorted by AI${r.confidence ? `, ${r.confidence} confidence` : ""}${r.reason ? `: ${esc(r.reason)}` : ""}</span>` : r.by === "you" ? "<span>set by you</span>" : r.by === null ? "<span>not in any topic</span>" : ""}${r.readable ? "" : "<span class=\"warn\">no readable text (scanned?)</span>"}</div>
       </div>
       <label class="sr" for="sel-${btoa(unescape(encodeURIComponent(r.path))).replace(/[^a-z0-9]/gi, "")}">Topic for ${esc(fileName(r.path))}</label>
       <select class="fc-select" id="sel-${btoa(unescape(encodeURIComponent(r.path))).replace(/[^a-z0-9]/gi, "")}" data-assign="${esc(r.path)}">${topicOptions(r.subject, r.topic)}</select>
+    </div>`;
+  const hit = (r, words) => `
+    <div class="fc-row">
+      <div class="fc-main">
+        <div class="row-title">${subjPill(r.subject)}<a href="${fileHref(r.path)}">${esc(fileName(r.path))}</a></div>
+        <div class="row-meta"><span>${esc(tname(r.topic))}</span>${r.folder ? `<span>${esc(r.folder)}</span>` : ""}<span>${r.in_name ? "match in the name" : `${r.hits}× in the text`}</span></div>
+        ${r.snippet && !r.in_name ? `<div class="file-snip">…${markWords(r.snippet, words)}…</div>` : ""}
+      </div>
+      <label class="sr" for="fsel-${btoa(unescape(encodeURIComponent(r.path))).replace(/[^a-z0-9]/gi, "")}">Topic for ${esc(fileName(r.path))}</label>
+      <select class="fc-select" id="fsel-${btoa(unescape(encodeURIComponent(r.path))).replace(/[^a-z0-9]/gi, "")}" data-assign="${esc(r.path)}">${topicOptions(r.subject, r.topic)}</select>
     </div>`;
   const group = list => S.subjects.map(s => {
     const mineS = list.filter(r => r.subject === s.name);
@@ -45,6 +86,9 @@ async function renderFilesCheck() {
     </div>
     <div class="fc-actions"><button class="btn" type="button" data-sync="sync">${icon("refresh")}Update files</button><button class="btn" type="button" id="resort">${icon("sparkles")}Sort again</button></div></div>
 
+    ${fileSearchHTML("fc-q", `Search all ${d.text_files} files by name or by words inside them`)}
+    <div id="fc-found" class="section" hidden></div>
+    <div id="fc-body">
     <div class="fc-stats">
       ${stat(d.portal_files || "–", "files on IntoStudy")}
       ${stat(d.missing.length + d.failed.length ? d.missing.length + d.failed.length : "All", d.missing.length + d.failed.length ? "not downloaded" : "downloaded", d.missing.length + d.failed.length ? "bad" : "good")}
@@ -67,9 +111,10 @@ async function renderFilesCheck() {
     ${unreadable.length || d.no_text.length ? `<section class="section"><div class="section-head"><h2>Files the AI can't read</h2><p>Scans, images and spreadsheets. They are still in your folders; open them yourself.</p></div>
       <div class="rows">${[...unreadable.map(r => r.path.replace(/\.txt$/, "")), ...d.no_text].map(p => `<div class="row-link"><div class="row-title">${subjPill(p.split("/")[0])}<span>${esc(fileName(p))}</span></div><div class="row-meta"><span>${esc(fileFolder(p))}</span></div></div>`).join("")}</div></section>` : ""}
 
-    ${soonEmpty.length ? `<p class="small muted section">Upcoming topics with no files yet (normal before the class): ${soonEmpty.map(t => esc(t.name)).join(", ")}.</p>` : ""}`;
+    ${soonEmpty.length ? `<p class="small muted section">Upcoming topics with no files yet (normal before the class): ${soonEmpty.map(t => esc(t.name)).join(", ")}.</p>` : ""}
+    </div>`;
 
-  $$("[data-assign]", view).forEach(sel => sel.addEventListener("change", async () => {
+  const bindAssign = root => $$("[data-assign]", root).forEach(sel => sel.addEventListener("change", async () => {
     try {
       await api("/api/files/assign", { path: sel.dataset.assign, topic: sel.value });
       toast(`Moved to ${tname(sel.value)}`);
@@ -77,9 +122,12 @@ async function renderFilesCheck() {
       meta.insertAdjacentHTML("beforeend", "<span class=\"good\">saved</span>");
     } catch (e) { toast(e.message); }
   }));
+  bindAssign($("#fc-body"));
+  wireFileSearch("fc-q", {}, $("#fc-found"), show => { $("#fc-body").hidden = !show; }, hit, bindAssign);
   $("#resort").addEventListener("click", async e => {
-    busy(e.currentTarget, true, "Sorting");
+    const btn = e.currentTarget;
+    busy(btn, true, "Sorting");
     try { const r = await api("/api/files/sort", {}); toast(r.sorted ? `Sorted ${plural(r.sorted, "file")}` : "Every file already has a place"); renderFilesCheck(); }
-    catch (err) { toast(err.message); busy(e.currentTarget, false); }
+    catch (err) { toast(err.message); busy(btn, false); }
   });
 }

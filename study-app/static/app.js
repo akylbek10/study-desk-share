@@ -4,9 +4,10 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view");
-const SUBJECT_VAR = { "Technical Maths": "--maths", Physics: "--physics", Chemistry: "--chemistry", EAP: "--eap" };
-const SHORT = { "Technical Maths": "Maths", Physics: "Physics", Chemistry: "Chemistry", EAP: "EAP" };
-const SUBJECT_SLOTS = ["--maths", "--physics", "--chemistry", "--eap"];
+// Subject colours and short names come from topics.json (via /api/state): colour slot = the subject's order there,
+// or its own "color" (1-6). Filled in by refresh().
+const SUBJECT_VAR = {}, SHORT = {}, KIND = {};
+const SUBJECT_SLOTS = ["--maths", "--physics", "--chemistry", "--eap", "--subj-5", "--subj-6"];
 const CONF_WORDS = ["Not rated", "Lost", "Shaky", "Getting there", "Solid", "Exam-ready"];
 let S = null;          // /api/state
 let current = {};      // what the router is showing
@@ -18,6 +19,7 @@ const ICON_PATHS = {
   cards: '<rect x="6.5" y="3" width="14" height="15" rx="2.5"/><path d="M3.5 7.5v10A3.5 3.5 0 0 0 7 21h9"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>',
   sliders: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+  bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   sparkles: '<path d="M11 3.5 12.9 8.6 18 10.5l-5.1 1.9L11 17.5l-1.9-5.1L4 10.5l5.1-1.9z"/><path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>',
   send: '<path d="M21 3 10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5z"/>',
   camera: '<path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h2l1.6-2.2h5.8L16.5 6h2A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><circle cx="12" cy="13" r="3.5"/>',
@@ -36,6 +38,7 @@ const ICON_PATHS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.5"/>',
   trash: '<path d="M4 7h16M9.5 7V4.5h5V7M6 7l1 13h10l1-13"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21.5"/>',
   copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/><path d="M15.5 8.5v-2a2.5 2.5 0 0 0-2.5-2.5H6A2.5 2.5 0 0 0 3.5 6.5V13A2.5 2.5 0 0 0 6 15.5h2.5"/>',
 };
 const icon = (name, cls = "i") => `<span class="${cls}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ""}</svg></span>`;
@@ -56,6 +59,7 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3800); }
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 401) { location.replace("/login"); throw new Error("Sign in again."); }   // phone version
   const data = await r.json().catch(() => ({ error: "The server sent an unreadable reply." }));
   if (!r.ok) throw new Error(data.error || r.statusText);
   return data;
@@ -80,20 +84,68 @@ function meter(v) {
 }
 const subjPill = s => `<span class="subj-pill"><i style="background:${subjColor(s)}"></i>${esc(SHORT[s] || s)}</span>`;
 
-// Markdown + LaTeX: take maths out first so Markdown can't mangle it.
-function md(text) {
+// Formulas the AI got slightly wrong, repaired before rendering (older saves have all of these):
+// lost backslashes, missing or misplaced $ signs, and LaTeX KaTeX can't parse.
+const TEX_TOKEN = String.raw`(?:\S*\\[a-zA-Z]+\S*|\S*[\^_{}]\S*|(?<![A-Za-z])[b-zB-HJ-Z](?![A-Za-z])|[\d.]+|[-+=<>×÷/()]+)`;
+const TEX_RUN = new RegExp(`${TEX_TOKEN}(?: +${TEX_TOKEN})*`, "g");
+const MATH_PART = /(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/;
+function wrapRuns(text) {   // "the mole (\text{mol}) and \text{CO}_2" -> "the mole ($\text{mol}$) and $\text{CO}_2$"
+  return text.replace(TEX_RUN, run => {
+    if (!/\\[a-zA-Z]/.test(run)) return run;
+    let [, head, body, tail] = run.match(/^(\(*)([\s\S]*?)([.,;:!?)]*)$/);
+    const open = t => (t.match(/\(/g) || []).length - (t.match(/\)/g) || []).length;
+    while (tail.startsWith(")") && open(body) > 0) { body += ")"; tail = tail.slice(1); }
+    return body ? `${head}$${body}$${tail}` : run;
+  });
+}
+function fixTex(s) {
+  s = s.replace(/\t(?=ext(?:bf|it|rm|sf|tt)?\{|imes|heta|frac|ilde|riangle|(?:an|au|o)(?![a-z]))/g, "\\t")   // \text sent as tab + "ext"
+    .replace(/\r(?=[a-z])/g, "\\r").replace(/\f(?=[a-z])/g, "\\f").replace(/\x08(?=[a-z])/g, "\\b")         // same rules as fix_tex in server.py
+    .replace(/\\n(?![a-z])/g, "\n")                     // a literal "\n"; LaTeX \neq, \nu stay
+    .replace(/\(\$([^$\n]+)\$\)\}/g, "($1)}")           // $ nested inside \text{... ($\text{ms}^{-1}$)}
+    .replace(/^[ \t]*\$[ \t]*$/gm, "$$$$")              // a $ alone on its line opens or closes a display formula
+    .replace(/\$ +(\\[^$\n]*?) *\$/g, (_, t) => `$${t}$`)    // "$ \text{...} $"
+    .replace(/\$\\text\{([^{}$\\]{25,})\}\$/g, "$1");     // a whole sentence put in a formula: plain text, so it wraps
+  if (!/\\[a-zA-Z]{2,}/.test(s)) return s;
+  if ((s.match(/\$/g) || []).length === 1) s = s.replace("$", "");   // "\sin 50^\circ$": one $ of a pair missing
+  if (!/\$|\\\(|\\\[/.test(s)) {                       // no $ at all: a bare formula, or a sentence with formulas in it
+    const words = s.replace(/\\(?:text|mathrm|textbf)\{[^{}]*\}/g, "").replace(/\\[a-zA-Z]+/g, "").match(/[A-Za-z]{3,}/g);
+    if (!words) return `$${s.trim()}$`;
+  }
+  return s.split(MATH_PART).map((part, i) => i % 2 ? part : wrapRuns(part)).join("");
+}
+function katexSafe(tex) {
+  return tex.replace(/\\,\s*\^/g, "\\,{}^")             // -34\,^\circ: a superscript needs something to sit on
+    .replace(/\\text\{((?:[^{}]|\{[^{}]*\})*)\}/g, (m, body) => /[\^_]/.test(body)   // \text{velocity (\text{ms}^{-1})}
+      ? `\\text{${body.replace(/\\text\{([^{}]*)\}((?:[\^_](?:\{[^{}]*\}|[^\s{}]))+)/g, (_, u, sup) => `$\\text{${u}}${sup}$`)}}` : m);
+}
+
+// Markdown + LaTeX: take maths out first so Markdown can't mangle it. inline: one line, no <p> (titles).
+function md(text, inline) {
   const maths = [];
   const hold = (tex, display) => { maths.push({ tex, display }); return `@@M${maths.length - 1}@@`; };
-  const s = String(text || "")
-    .replace(/\\n(?![a-z])/g, "\n")   // Gemini sometimes sends a literal "\n"; LaTeX \neq, \nu stay
+  const s = fixTex(String(text || ""))
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => hold(t, true))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => hold(t, true))
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => hold(t, false))
     .replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (_, pre, t) => pre + hold(t, false));
-  return DOMPurify.sanitize(marked.parse(s, { breaks: true })).replace(/@@M(\d+)@@/g, (_, i) => {
+  return DOMPurify.sanitize(inline ? marked.parseInline(s) : marked.parse(s, { breaks: true })).replace(/@@M(\d+)@@/g, (_, i) => {
     const m = maths[+i];
-    try { return katex.renderToString(m.tex, { displayMode: m.display, throwOnError: false }); } catch { return esc(m.tex); }
+    try { return katex.renderToString(katexSafe(m.tex), { displayMode: m.display, throwOnError: false }); } catch { return esc(m.tex); }
   });
+}
+const mdi = text => md(text, true);   // a title or one-line summary that may hold maths
+// Where HTML can't go (top bar, tab title, tooltips): "$30^\circ$" -> "30°", "\frac{1}{2}" -> "1/2".
+const TEX_PLAIN = { pi: "π", theta: "θ", alpha: "α", beta: "β", lambda: "λ", mu: "μ", Delta: "Δ", times: "×", div: "÷", pm: "±",
+  le: "≤", leq: "≤", ge: "≥", geq: "≥", neq: "≠", approx: "≈", rightarrow: "→", to: "→", infty: "∞", cdot: "·", circ: "°" };
+const SUP = { 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹", "+": "⁺", "-": "⁻" };
+function plainTex(s) {
+  return String(s || "").replace(/\$+([^$]*)\$+/g, "$1")
+    .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, "$1/$2").replace(/\\sqrt\{([^{}]*)\}/g, "√$1")
+    .replace(/\\(?:text|mathrm|textbf)\{([^{}]*)\}/g, "$1")
+    .replace(/\\([a-zA-Z]+)/g, (m, w) => TEX_PLAIN[w] ?? w)
+    .replace(/\^\{?([0-9+-]+|°)\}?/g, (_, d) => d === "°" ? "°" : [...d].map(c => SUP[c]).join(""))
+    .replace(/[{}]/g, "");
 }
 function readImage(file) {
   return new Promise((res, rej) => {
@@ -148,7 +200,8 @@ function setNav(key, title) {
     const on = a.dataset.nav === key || (key.startsWith("subject:") && a.dataset.nav === "subjects");
     if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  $("#topbar-title").textContent = title || "";
+  title = plainTex(title);
+  $("#topbar-title").textContent = title;
   document.title = title ? `${title} | Study Desk` : "Study Desk";
 }
 addEventListener("scroll", () => $(".topbar").classList.toggle("scrolled", scrollY > 30), { passive: true });
@@ -164,12 +217,12 @@ function renderToday() {
   const topics = allTopics();
   const upcomingExams = [...S.exams].filter(e => e.date >= S.today).sort((a, b) => a.date.localeCompare(b.date));
   const firstExam = upcomingExams[0];
-  const inClass = topics.filter(t => thisWeek(t) && t.subject !== "EAP");
+  const inClass = topics.filter(t => thisWeek(t) && KIND[t.subject] !== "english");
   const name = S.name ? `, ${esc(S.name)}` : "";
   const h = new Date().getHours();
   const greet = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
 
-  let sub = firstExam ? `${plural(dayDiff(S.today, firstExam.date), "day")} until your Semester 1 exams start.` : "No upcoming exams set.";
+  let sub = firstExam ? `${plural(dayDiff(S.today, firstExam.date), "day")} until your ${esc(S.term?.name || "semester")} exams start.` : "No upcoming exams set.";
   if (inClass.length) sub += ` In class this week: ${inClass.map(t => esc(t.name)).join(", ")}.`;
 
   view.innerHTML = `
@@ -212,8 +265,8 @@ function renderToday() {
 const RULER = { H: 1, lanes: [] };
 
 function rulerHTML(topics, exams) {
-  const start = "2026-09-14";
-  const lastExam = exams.length ? exams[exams.length - 1].date : "2027-01-12";
+  const start = S.term?.week1 ? addDays(S.term.week1, -7) : addDays(S.today, -60);
+  const lastExam = exams.length ? exams[exams.length - 1].date : addDays(start, 120);
   const end = parseDay(lastExam) > parseDay(S.today) ? addDays(lastExam, 9) : addDays(S.today, 21);
   const W = 1000, L = 128, R = 18, top = 46, laneH = 38;
   const subjects = S.subjects.map(s => s.name);
@@ -241,9 +294,9 @@ function rulerHTML(topics, exams) {
     svg += `<rect x="12" y="${y - 5}" width="10" height="10" rx="3" fill="${subjColor(s)}" />
       <text class="lane-label" x="30" y="${y + 4.5}">${esc(SHORT[s])}</text>
       <line class="lane" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" />`;
-    if (s === "EAP") {
-      svg += `<rect x="${x("2026-09-15")}" y="${y - 3}" width="${x(addDays(S.breaks?.[0]?.start || "2026-12-14", -1)) - x("2026-09-15")}" height="6" rx="3" fill="${subjColor(s)}" opacity=".45"
-        data-tip="<b>EAP</b><br>Reading, writing, listening and speaking skills run all semester" tabindex="0" />`;
+    if (KIND[s] === "english") {
+      svg += `<rect x="${x(start)}" y="${y - 3}" width="${x(addDays(S.breaks?.[0]?.start || addDays(start, 90), -1)) - x(start)}" height="6" rx="3" fill="${subjColor(s)}" opacity=".45"
+        data-tip="<b>${esc(SHORT[s])}</b><br>Reading, writing, listening and speaking skills run all semester" tabindex="0" />`;
       return;
     }
     for (const t of topics.filter(t => t.subject === s)) {
@@ -260,7 +313,7 @@ function rulerHTML(topics, exams) {
     const ex = x(d);
     svg += `<line x1="${ex}" x2="${ex}" y1="${top - 10}" y2="${H - 22}" stroke="var(--ink)" stroke-width="1.5" />
       <path class="exam-flag" d="M${ex} ${top - 10} h12 l-3 4 3 4 h-12z" />
-      <text class="exam-label" x="${ex - 4}" y="${top - 16}" text-anchor="end" data-tip="${esc(list.map(e => e.name).join("<br>"))}" tabindex="0">${list.length > 1 ? "Exams" : esc(SHORT[list[0].subject] || "Exam")} ${fmtDay(d)}</text>`;
+      <text class="exam-label" x="${ex - 4}" y="${top - 16}" text-anchor="end" data-tip="${esc(list.map(e => esc(e.name)).join("<br>"))}" tabindex="0">${list.length > 1 ? "Exams" : esc(SHORT[list[0].subject] || "Exam")} ${fmtDay(d)}</text>`;
   }
   // today
   const tx = x(S.today);
@@ -288,7 +341,7 @@ function subjectFacts(s) {
 }
 function renderSubjects() {
   setNav("subjects", "Subjects");
-  view.innerHTML = `<div class="page-head"><div><h1>Subjects</h1><p class="sub">Semester 1 of the International Foundation Year.</p></div></div>
+  view.innerHTML = `<div class="page-head"><div><h1>Subjects</h1><p class="sub">${esc(S.term?.name || "This semester")} of the International Foundation Year.</p></div></div>
     <div class="rows">${S.subjects.map(s => {
       const f = subjectFacts(s);
       return `<a class="subject-band" href="#/subject/${encodeURIComponent(s.name)}">
@@ -313,10 +366,12 @@ function renderSubject(name) {
     <div class="page-head"><div>
       <a class="crumb" href="#/subjects">${icon("chevronLeft")}Subjects</a>
       <h1><span class="swatch" style="display:inline-block;width:14px;height:14px;border-radius:4px;margin:0 12px 4px 0;background:${subjColor(name)}"></span>${esc(name)}</h1>
-      <p class="sub">${f.tt.length} of ${s.topics.length} Semester 1 topics taught.${f.avg ? ` Average confidence ${f.avg}/5 across ${plural(f.rated.length, "rated topic")}.` : " No topics rated yet."}${exam ? ` ${esc(exam.name)} ${relDay(exam.date)}.` : ""}</p>
+      <p class="sub">${f.tt.length} of ${s.topics.length} ${esc(S.term?.name || "")} topics taught.${f.avg ? ` Average confidence ${f.avg}/5 across ${plural(f.rated.length, "rated topic")}.` : " No topics rated yet."}${exam ? ` ${esc(exam.name)} ${relDay(exam.date)}.` : ""}</p>
     </div></div>
     ${keyNotice()}
-    <div class="table-wrap"><table>
+    ${fileSearchHTML("sf-q", `Search ${name} files by name or by words inside them`)}
+    <div id="sf-found" class="section" hidden></div>
+    <div class="table-wrap" id="sf-table"><table>
       <thead><tr><th>Topic</th><th>In class</th><th>Status</th><th>Confidence</th><th class="num">Marks</th><th class="num">Cards</th><th>Last studied</th></tr></thead>
       <tbody>${s.topics.map(t => `
         <tr class="link" data-href="#/topic/${t.id}/check">
@@ -329,6 +384,7 @@ function renderSubject(name) {
           <td>${t.last ? esc(relDay(t.last)) : `<span class="faint">Never</span>`}</td>
         </tr>`).join("")}</tbody></table></div>`;
   $$("tr.link", view).forEach(tr => tr.addEventListener("click", e => { if (!e.target.closest("a")) location.hash = tr.dataset.href; }));
+  wireFileSearch("sf-q", { subject: name }, $("#sf-found"), show => { $("#sf-table").hidden = !show; });
 }
 
 /* =====================================================================
@@ -348,7 +404,6 @@ function renderTopic(id, tab) {
         <h1>${esc(t.name)}</h1>
         <p class="sub muted" style="margin-top:8px">${t.code ? esc(t.code) + ". " : ""}${when}.${t.files ? "" : " No course files yet, so the AI uses the standard syllabus."}</p>
         <div class="topic-actions">${statusTag(t)}
-          <button class="btn gem-btn" type="button" data-gemini="${t.id}">${icon("sparkles")}Study this topic in Gemini</button>
           ${t.status === "confirmed" ? "" : `<button class="btn" type="button" data-mark="${t.id}" data-on="${t.status !== "none" ? 1 : 0}">${icon("check")}${t.status !== "none" ? "Studied (untick)" : "Mark as studied"}</button>`}
         </div>
       </div>
@@ -385,11 +440,20 @@ function chatHTML(msgs) {
   const last = msgs[msgs.length - 1];
   return msgs.map(m => m.role === "user"
     ? `<div class="msg user">${esc(m.text)}${m.hadImage ? `<div class="att">${icon("camera")}Photo attached</div>` : ""}</div>`
-    : `<div class="msg model md">${md(m.text)}${typeof figureHTML === "function" ? figureHTML(m.figure) : ""}${
+    : `<div class="msg model md">${msgBodyHTML(m)}${
         m.checked || m.card ? `<div class="msg-notes">${m.checked ? `<span>${icon("check")}Double-checked</span>` : ""}${m.card ? `<span>${icon("cards")}Your mistake was saved as a flashcard</span>` : ""}</div>` : ""}</div>${
         m === last ? `<div class="chips follow">${(m.problem ? FOLLOW_UPS.problem : FOLLOW_UPS.explain).map(q => `<button class="chip" type="button">${q}</button>`).join("")}<button class="chip" type="button" data-photo>${icon("camera")}Check my solution (photo)</button></div>` : ""}`).join("");
 }
-const modelMsg = r => ({ role: "model", text: r.answer, figure: r.figure || null, problem: !!r.problem, checked: !!r.checked, card: !!r.card_added });
+const modelMsg = r => ({ role: "model", text: r.answer, figures: r.figures || (r.figure ? [r.figure] : []), problem: !!r.problem, checked: !!r.checked, card: !!r.card_added });
+/* the tutor's text with its figures drawn where it put [[FIG n]]; any figure it didn't place goes at the end */
+function msgBodyHTML(m) {
+  const figs = m.figures || (m.figure ? [m.figure] : []), used = new Set();
+  const fig = n => { const f = figs[n - 1]; if (!f || used.has(n)) return ""; used.add(n); return figureHTML(f); };
+  const parts = String(m.text || "").split(/\[\[\s*FIG(?:URE)?\s*(\d+)\s*\]\]/i);
+  let html = "";
+  parts.forEach((p, i) => { html += i % 2 ? fig(+p) : (p.trim() ? md(p) : ""); });
+  return html + figs.map((f, i) => used.has(i + 1) ? "" : figureHTML(f)).join("");
+}
 const thinkingHTML = label => `<div class="msg model thinking"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>${label}</div>`;
 
 function paneTutor(t) {
@@ -416,7 +480,7 @@ function paneTutor(t) {
       <div class="chips">${starters.map(q => `<button class="chip" type="button">${q}</button>`).join("")}</div></div>`;
   };
   const go = async text => {
-    text = text.trim(); if (!text && !image) return;
+    text = text.trim(); if ((!text && !image) || send.disabled) return;
     msgs.push({ role: "user", text: text || CHECK_PHOTO, image, hadImage: !!image });
     image = null; $("#attach").hidden = true; input.value = ""; input.style.height = "";
     draw(); chat.insertAdjacentHTML("beforeend", thinkingHTML("Thinking it through and checking the answer"));
@@ -560,8 +624,8 @@ async function paneFiles(t) {
   const scanned = files.filter(f => !f.readable).length;
   const fileRow = (f, extra = "") => {
     const ext = (f.name.split(".").pop() || "").toUpperCase();
-    const inner = `<span class="ext">${esc(ext)}</span><span class="name">${esc(f.name.replace(/\.[^.]+$/, ""))}${extra}</span>${f.readable === false ? `<span class="tag">Scan</span>` : ""}${f.original ? icon("external") : ""}`;
-    return f.original ? `<a class="file" href="/file?p=${encodeURIComponent(f.path)}" target="_blank" rel="noopener">${inner}</a>` : `<div class="file">${inner}</div>`;
+    const inner = `<span class="ext">${esc(ext)}</span><span class="name">${esc(f.name.replace(/\.[^.]+$/, ""))}${extra}</span>${f.readable === false ? `<span class="tag">Scan</span>` : ""}${f.original ? icon("chevronRight") : ""}`;
+    return f.original ? `<a class="file" href="${fileHref(f.path)}">${inner}</a>` : `<div class="file">${inner}</div>`;
   };
   const all = () => {
     const groups = {};
@@ -572,7 +636,7 @@ async function paneFiles(t) {
     <div class="file-search"><label class="sr" for="fs-q">Search this topic's files</label>
       <input type="search" id="fs-q" placeholder="Search ${files.length} files by name or by words inside them" autocomplete="off">
       <span class="muted small" id="fs-note"></span></div>
-    <p class="muted small" style="margin-bottom:16px">${plural(files.length, "file")} from the portal${scanned ? `. ${scanned} ${scanned === 1 ? "is a scan" : "are scans"} without text, so the AI can't read ${scanned === 1 ? "it" : "them"}` : ""}. PDFs open in a new tab; slides and Word files download.</p>
+    <p class="muted small" style="margin-bottom:16px">${plural(files.length, "file")} from the portal${scanned ? `. ${scanned} ${scanned === 1 ? "is a scan" : "are scans"} without text, so the AI can't read ${scanned === 1 ? "it" : "them"}` : ""}. Files open right here; Word worksheets can be filled in.</p>
     <div id="fs-list">${all()}</div>`;
   const list = $("#fs-list"), note = $("#fs-note");
   const mark = (text, words) => words.reduce((h, w) => h.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>"), esc(text));
@@ -827,7 +891,9 @@ function renderSettings() {
   view.innerHTML = `
     <div class="page-head"><div><h1>Settings</h1></div></div>
     <div style="max-width:680px;display:grid;gap:22px">
+      ${updateSettingsHTML()}
       ${syncSettingsHTML()}
+      ${compassSettingsHTML()}
       <section class="panel pad" style="display:grid;gap:14px">
         <h2>Gemini</h2>
         <p class="muted small">${S.has_key ? "A key is saved on this Mac. Paste a new one to replace it." : `Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. It's saved only in this app's folder.`}</p>
@@ -844,7 +910,7 @@ function renderSettings() {
       </section>
       <section class="panel pad" style="display:grid;gap:14px">
         <h2>Exam dates</h2>
-        <p class="muted small">Set to the start of the January exam period from your calendars. Change them when your exam timetable comes out.</p>
+        <p class="muted small">Taken from your course files when Study Desk set up your programme; set them to the start of your exam period. Change them when your exam timetable comes out.</p>
         <div id="exams" style="display:grid;gap:8px">${S.exams.map(examRow).join("")}</div>
         <div style="display:flex;gap:8px;justify-content:space-between"><button class="btn" id="addexam" type="button">Add exam</button><button class="btn primary" id="saveexams" type="button">Save exam dates</button></div>
       </section>
@@ -857,7 +923,7 @@ function renderSettings() {
           <h2>Colour scheme</h2>
           <div class="seg" role="group" aria-label="Light or dark">${[["auto", "Match system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme="${v}" aria-pressed="${v === theme}" style="padding:0 14px">${l}</button>`).join("")}</div>
         </div>
-        <p class="muted small">Click a scheme to switch the whole app at once. Each one has a light and a dark version. Subject colours stay the same in every scheme, so Maths is always blue.</p>
+        <p class="muted small">Click a scheme to switch the whole app at once. Each one has a light and a dark version. Subject colours stay the same in every scheme.</p>
         <div class="pal-grid">${Object.entries(window.PALETTES || {}).map(([id, p]) => paletteCard(id, p, id === pal)).join("")}</div>
       </section>`);
   $(".pal-grid").addEventListener("click", e => {
@@ -936,7 +1002,8 @@ function asDraw() {
   asBody.innerHTML = AS.msgs.length ? chatHTML(AS.msgs) : `
     <div class="chat-empty"><h3>What can I help with?</h3>
     <p class="muted small" style="margin-bottom:14px">I can see your topics, exam dates, confidence ratings, practice marks and flashcards.</p>
-    <div class="chips" style="flex-direction:column;align-items:stretch">${["What should I study today?", "Make me a revision plan until the January exams", "Which topics am I weakest in?", "What is on the Chemistry end of Semester 1 test?", "How does the EAP writing exam work?"].map(q => `<button class="chip" type="button">${q}</button>`).join("")}</div></div>`;
+    <div class="chips" style="flex-direction:column;align-items:stretch">${["What should I study today?", "Make me a revision plan until my exams", "Which topics am I weakest in?",
+      ...S.subjects.slice(0, 2).map(s => s.kind === "english" ? `How does the ${s.short} writing exam work?` : `What is on the ${s.short} end of semester exam?`)].map(q => `<button class="chip" type="button">${q}</button>`).join("")}</div></div>`;
   asBody.scrollTop = asBody.scrollHeight;
 }
 function asToggle(open) {
@@ -946,7 +1013,7 @@ function asToggle(open) {
   if (AS.open) { asDraw(); setTimeout(() => asInput.focus(), 50); } else $("#open-assistant").focus({ preventScroll: true });
 }
 async function asSend(text) {
-  text = text.trim(); if (!text) return;
+  text = text.trim(); if (!text || $("#as-send").disabled) return;
   AS.msgs.push({ role: "user", text }); asInput.value = ""; asInput.style.height = "";
   asDraw(); asBody.insertAdjacentHTML("beforeend", thinkingHTML("Thinking")); asBody.scrollTop = asBody.scrollHeight;
   $("#as-send").disabled = true;
@@ -981,15 +1048,18 @@ setInterval(() => { if (document.visibilityState === "visible" && Date.now() - l
 /* ---------- router ---------- */
 async function refresh() {
   S = await api("/api/state");
-  const used = new Set(S.subjects.map(s => SUBJECT_VAR[s.name]).filter(Boolean));
-  const free = SUBJECT_SLOTS.filter(v => !used.has(v));
-  S.subjects.forEach((s, i) => {          // any subject list: unknown subjects take the colours nobody uses
-    SUBJECT_VAR[s.name] ??= free.shift() || SUBJECT_SLOTS[i % SUBJECT_SLOTS.length];
-    SHORT[s.name] ??= s.name;
+  document.body.classList.toggle("hosted", !!S.hosted);   // phone version: hide what needs the Mac or AI
+  if (S.setup_needed && !S.hosted) { location.replace("/setup"); return; }
+  S.subjects.forEach((s, i) => {          // any subject list: topics.json order (or its own "color") picks the colour
+    const slot = Number.isInteger(s.color) && s.color >= 1 && s.color <= SUBJECT_SLOTS.length ? s.color - 1 : i % SUBJECT_SLOTS.length;
+    SUBJECT_VAR[s.name] = SUBJECT_SLOTS[slot];
+    SHORT[s.name] = s.short || s.name;
+    KIND[s.name] = s.kind;
   });
   if (typeof syncLoad === "function") await syncLoad();
   if (typeof programLoad === "function") await programLoad();
   navHTML();
+  if (typeof bellPaint === "function") bellPaint();
   if (current.page) { const [k, title] = navKeyFor(current.page, current.a); setNav(k, title); }
 }
 async function route() {
@@ -1009,6 +1079,7 @@ async function route() {
     else if (page === "review") await renderReview(a);
     else if (page === "profile") await renderProfile();
     else if (page === "settings") renderSettings();
+    else if (page === "file") await renderFile(decodeURIComponent(a));
     else renderToday();
   } catch (e) {
     view.innerHTML = `<div class="rows empty" style="margin-top:40px"><h3>Study Desk can't reach its server</h3><p>Start it with “Start Study Desk.command” in the study-app folder, then reload this page.</p><p class="small faint">${esc(e.message)}</p></div>`;

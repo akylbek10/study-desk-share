@@ -111,7 +111,7 @@ function compassDialog() {
     <h2>Add this week's programme from Compass</h2>
     <p class="muted small">Open the weekly programme your teacher posted in Compass, select all the text and copy it (or take a screenshot). Study Desk reads which topics it covers and uses it for this week instead of the plan.</p>
     <label class="cp-label" for="cp-text">Text from Compass</label>
-    <textarea id="cp-text" rows="9" placeholder="Paste here, e.g. Physics week 9: Mon circular motion, Wed momentum…"></textarea>
+    <textarea id="cp-text" rows="9" placeholder="Paste the post here, e.g. Week 9: Monday …, Wednesday …"></textarea>
     <label class="cp-label" for="cp-img">or a screenshot</label>
     <input type="file" id="cp-img" accept="image/*">
     <div class="gem-row" style="margin-top:14px"><button class="btn primary" type="button" data-act="read">${icon("sparkles")}Read it</button></div>`;

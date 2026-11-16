@@ -43,8 +43,8 @@ async function paneLearn(t) {
       return `<li class="${passed ? "done" : ""} ${s.id === nextId ? "next" : ""}">
         <span class="path-num" aria-hidden="true">${passed ? icon("check") : i + 1}</span>
         <div class="path-body">
-          <a class="path-title" href="#/learn/${t.id}/${s.id}">${esc(s.title)}</a>
-          <p>${esc(s.summary)}</p>
+          <a class="path-title" href="#/learn/${t.id}/${s.id}">${mdi(s.title)}</a>
+          <p>${mdi(s.summary)}</p>
           <div class="row-meta"><span>About ${s.minutes || 20} min</span><span>${plural(s.objectives.length, "objective")}</span>${st.tests?.length ? `<span>${plural(st.tests.length, "test")} taken</span>` : ""}<span class="tag ${status.cls}">${status.label}</span></div>
         </div>
         <a class="btn ${s.id === nextId ? "primary" : ""} sm" href="#/learn/${t.id}/${s.id}">${cta}</a>
@@ -53,9 +53,10 @@ async function paneLearn(t) {
     <div style="margin-top:16px"><button class="btn quiet sm" id="rebuild" type="button">${icon("refresh")}Rebuild the plan</button></div>`;
   $("#rebuild").onclick = async e => {
     if (!confirm("Rebuild the lesson plan from your files? Subtopics that get new names lose their saved lessons and test results.")) return;
-    busy(e.currentTarget, true, "Rebuilding");
+    const btn = e.currentTarget;
+    busy(btn, true, "Rebuilding");
     try { await api("/api/learn/outline", { topic: t.id, refresh: true }); await refresh(); renderTopic(t.id, "learn"); }
-    catch (err) { toast(err.message); busy(e.currentTarget, false); }
+    catch (err) { toast(err.message); busy(btn, false); }
   };
 }
 
@@ -84,20 +85,19 @@ async function renderLearn(tid, sid, tab) {
         <div class="learn-head">
           <div>
             <p class="learn-kicker">Part ${idx + 1} of ${data.outline.length}<span class="tag ${status.cls}">${status.label}</span></p>
-            <h1>${esc(sub.title)}</h1>
-            <p class="sub muted">${esc(sub.summary)}</p>
+            <h1>${mdi(sub.title)}</h1>
+            <p class="sub muted">${mdi(sub.summary)}</p>
           </div>
-          <button class="btn gem-btn" type="button" data-gemini="${tid}" data-gemini-sub="${sid}">${icon("sparkles")}Study in Gemini</button>
         </div>
-        <details class="objectives"><summary>What you'll be able to do</summary><ul>${sub.objectives.map(o => `<li>${esc(o)}</li>`).join("")}</ul></details>
+        <details class="objectives"><summary>What you'll be able to do</summary><ul>${sub.objectives.map(o => `<li>${mdi(o)}</li>`).join("")}</ul></details>
         <nav class="tabs" aria-label="Lesson sections">
           ${[["lesson", "Guided lesson", "layers"], ["notes", "Notes", "file"], ["slides", "Slides", "cards"], ["test", "Mini test", "target"], ["mine", "My notes", "pen"]].map(([k, l, ic]) =>
             `<a href="#/learn/${tid}/${sid}/${k}" ${k === tab ? 'aria-current="page"' : ""}>${icon(ic)}${l}</a>`).join("")}
         </nav>
         <div id="lpane"></div>
         <div class="learn-foot">
-          ${prev ? `<a class="btn quiet" href="#/learn/${tid}/${prev.id}">${icon("chevronLeft")}<span>${esc(prev.title)}</span></a>` : "<span></span>"}
-          ${next ? `<a class="btn quiet" href="#/learn/${tid}/${next.id}"><span>${esc(next.title)}</span>${icon("chevronRight")}</a>` : `<a class="btn quiet" href="#/topic/${tid}/learn"><span>All subtopics</span>${icon("chevronRight")}</a>`}
+          ${prev ? `<a class="btn quiet" href="#/learn/${tid}/${prev.id}">${icon("chevronLeft")}<span>${mdi(prev.title)}</span></a>` : "<span></span>"}
+          ${next ? `<a class="btn quiet" href="#/learn/${tid}/${next.id}"><span>${mdi(next.title)}</span>${icon("chevronRight")}</a>` : `<a class="btn quiet" href="#/topic/${tid}/learn"><span>All subtopics</span>${icon("chevronRight")}</a>`}
         </div>
       </div>
       <aside class="learn-chat" id="lchat" aria-label="Ask about this lesson">
@@ -126,17 +126,18 @@ function setupLearnChat() {
     body.scrollTop = body.scrollHeight;
   };
   LS.ask = async (text, image = null) => {
-    text = String(text || "").trim(); if (!text && !image) return;
+    text = String(text || "").trim(); if ((!text && !image) || send.disabled) return;
+    const chat = LS.chat;                                // the subtopic can change while Gemini answers
     chatEl.classList.add("open");
-    LS.chat.push({ role: "user", text: text || CHECK_PHOTO, image, hadImage: !!image }); input.value = ""; input.style.height = "";
+    chat.push({ role: "user", text: text || CHECK_PHOTO, image, hadImage: !!image }); input.value = ""; input.style.height = "";
     draw(); body.insertAdjacentHTML("beforeend", thinkingHTML("Thinking it through")); body.scrollTop = body.scrollHeight;
     send.disabled = true;
     try {
-      LS.chat.push(modelMsg(await api("/api/learn/ask", { topic: LS.tid, sub: LS.sid, focus: LS.focus,
-        messages: LS.chat.map(m => ({ role: m.role, text: m.text, image: m.image })) })));
-    } catch (e) { const last = LS.chat.pop(); input.value = last.text; toast(e.message); }
-    LS.chat.forEach(m => { delete m.image; });          // photos are sent once, never stored
-    send.disabled = false; store.set(key, LS.chat.slice(-40)); draw();
+      chat.push(modelMsg(await api("/api/learn/ask", { topic: LS.tid, sub: LS.sid, focus: LS.focus,
+        messages: chat.map(m => ({ role: m.role, text: m.text, image: m.image })) })));
+    } catch (e) { const last = chat.pop(); input.value = last.text; toast(e.message); }
+    chat.forEach(m => { delete m.image; });             // photos are sent once, never stored
+    send.disabled = false; store.set(key, chat.slice(-40)); draw();
     const lastModel = [...body.querySelectorAll(".msg.model")].pop(); if (lastModel) body.scrollTop = lastModel.offsetTop - 10;
   };
   draw();
@@ -175,7 +176,7 @@ async function paneLesson(sub, st, next) {
     const a = answers[i], isCurrent = i === at, answered = a != null || i < at;
     const correct = s.check.answer_index;
     return `<article class="step ${i < at ? "past" : ""}" id="step-${i}">
-      <div class="step-top"><span class="step-n">Step ${i + 1} of ${steps.length}</span><h3>${esc(s.title)}</h3></div>
+      <div class="step-top"><span class="step-n">Step ${i + 1} of ${steps.length}</span><h3>${mdi(s.title)}</h3></div>
       <div class="md">${md(s.explain)}</div>
       ${figureHTML(s.figure)}
       <div class="check">
@@ -195,7 +196,7 @@ async function paneLesson(sub, st, next) {
     const shown = steps.slice(0, Math.min(at + 1, steps.length));
     const done = at >= steps.length;
     pane.innerHTML = `
-      <div class="lesson-progress" aria-label="Lesson progress">${steps.map((s, i) => `<i class="${i < at ? "on" : i === at ? "cur" : ""}" title="${esc(s.title)}"></i>`).join("")}</div>
+      <div class="lesson-progress" aria-label="Lesson progress">${steps.map((s, i) => `<i class="${i < at ? "on" : i === at ? "cur" : ""}" title="${esc(plainTex(s.title))}"></i>`).join("")}</div>
       <div class="md lesson-intro">${md(lesson.intro)}</div>
       ${shown.map(stepHTML).join("")}
       ${done ? `<section class="lesson-done">
@@ -238,7 +239,7 @@ async function paneNotes(sub) {
       <button class="btn quiet sm" type="button" id="regen">${icon("refresh")}Rewrite</button></div>
     <article class="panel pad md notes-doc">${md(notes)}</article>`;
   $("#dl").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([`# ${sub.title}\n\n${notes}`], { type: "text/markdown" })); a.download = `${sub.title.replace(/[^\w\- ]+/g, "")}.md`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
-  $("#regen").onclick = async e => { busy(e.currentTarget, true, "Rewriting"); try { await api("/api/learn/notes", { topic: LS.tid, sub: LS.sid, refresh: true }); paneNotes(sub); } catch (err) { toast(err.message); busy(e.currentTarget, false); } };
+  $("#regen").onclick = async e => { const btn = e.currentTarget; busy(btn, true, "Rewriting"); try { await api("/api/learn/notes", { topic: LS.tid, sub: LS.sid, refresh: true }); paneNotes(sub); } catch (err) { toast(err.message); busy(btn, false); } };
   // ask about a selection
   $(".notes-doc").addEventListener("mouseup", () => {
     const sel = String(getSelection()).trim();
@@ -259,7 +260,7 @@ async function paneSlides(sub) {
     const s = slides[i];
     LS.focus = `Slide ${i + 1} "${s.title}":\n${s.bullets.join("\n")}\nNotes: ${s.notes || ""}`;
     pane.innerHTML = `
-      <div class="deck" id="deck" tabindex="0" aria-roledescription="slide deck" aria-label="Slides for ${esc(sub.title)}">
+      <div class="deck" id="deck" tabindex="0" aria-roledescription="slide deck" aria-label="Slides for ${esc(plainTex(sub.title))}">
         <div class="slide">
           <span class="slide-n">${i + 1} / ${slides.length}</span>
           <h2 class="slide-title">${md(s.title).replace(/^<p>|<\/p>\s*$/g, "")}</h2>
@@ -301,7 +302,7 @@ function paneTest(sub, st, next) {
   pane.innerHTML = `
     <div class="panel pad test-setup">
       <h2>Mini test</h2>
-      <p class="muted">Score ${PASS}% or more to pass <b>${esc(sub.title)}</b>. You choose how many questions and how hard.</p>
+      <p class="muted">Score ${PASS}% or more to pass <b>${mdi(sub.title)}</b>. You choose how many questions and how hard.</p>
       <div class="setup-grid">
         <div class="field"><span>Questions</span><div class="seg" role="group" aria-label="Number of questions" id="count">${[5, 10, 15, 20].map(n => `<button type="button" data-v="${n}" aria-pressed="${prefs.count === n}">${n}</button>`).join("")}</div></div>
         <div class="field"><span>Difficulty</span><div class="seg" role="group" aria-label="Difficulty" id="diff">${DIFF.map(([v, l]) => `<button type="button" data-v="${v}" aria-pressed="${prefs.difficulty === v}" style="padding:0 12px">${l}</button>`).join("")}</div></div>
@@ -315,11 +316,12 @@ function paneTest(sub, st, next) {
   const pick = id => $(`#${id}`).addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; $$(`#${id} button`).forEach(x => x.setAttribute("aria-pressed", x === b)); prefs[id === "count" ? "count" : "difficulty"] = id === "count" ? +b.dataset.v : b.dataset.v; store.set("testprefs", prefs); });
   pick("count"); pick("diff");
   $("#start").onclick = async e => {
-    busy(e.currentTarget, true, "Writing questions");
+    const btn = e.currentTarget;
+    busy(btn, true, "Writing questions");
     try {
       const { questions } = await api("/api/learn/test", { topic: LS.tid, sub: LS.sid, count: prefs.count, difficulty: prefs.difficulty });
       if (LS.sid === sub.id) runTest(sub, questions, prefs.difficulty, next);
-    } catch (err) { toast(err.message); busy(e.currentTarget, false); }
+    } catch (err) { toast(err.message); busy(btn, false); }
   };
 }
 
@@ -348,13 +350,17 @@ function runTest(sub, qs, difficulty, next) {
         </div>
       </div>`;
   };
+  let sending = false;
   const submit = async () => {
+    if (sending) return;
     const left = picked.filter(x => x == null).length;
     if (left && !confirm(`${plural(left, "question")} not answered. Unanswered questions count as wrong. Submit anyway?`)) return;
     const correct = qs.filter((q, j) => picked[j] === q.answer_index).length;
     let res;
+    sending = true;
     try { res = await api("/api/learn/submit", { topic: LS.tid, sub: LS.sid, total: qs.length, correct, difficulty }); }
     catch (e) { toast(e.message); return; }
+    finally { sending = false; }
     current.keys = null;
     showResults(sub, qs, picked, res, next);
     refresh();
@@ -382,7 +388,7 @@ function showResults(sub, qs, picked, res, next) {
     <section class="result-hero ${res.passed ? "good" : "bad"}">
       <div class="big">${res.pct}%</div>
       <div><h2>${res.passed ? (res.newly_passed ? "Passed. Subtopic ticked off." : "Passed again.") : `Not yet. You need ${res.pass_mark}%.`}</h2>
-        <p>${qs.length - wrong.length} of ${qs.length} correct. ${res.passed ? (next ? `Next up: ${esc(next.title)}.` : "That was the last subtopic of this topic.") : "Go through the mistakes below, then try again."} Topic confidence is now ${res.confidence.toFixed(1)}/5.</p>
+        <p>${qs.length - wrong.length} of ${qs.length} correct. ${res.passed ? (next ? `Next up: ${mdi(next.title)}.` : "That was the last subtopic of this topic.") : "Go through the mistakes below, then try again."} Topic confidence is now ${res.confidence.toFixed(1)}/5.</p>
         <div class="step-actions">
           ${res.passed && next ? `<a class="btn primary" href="#/learn/${LS.tid}/${next.id}">Next subtopic${icon("chevronRight")}</a>` : ""}
           <button class="btn ${res.passed ? "" : "primary"}" type="button" id="retest">${res.passed ? "Take another test" : "Try again"}</button>
@@ -412,11 +418,12 @@ function showResults(sub, qs, picked, res, next) {
   const s2 = statusOf(st), tag = $(".learn-kicker .tag");
   if (tag) { tag.className = `tag ${s2.cls}`; tag.textContent = s2.label; }
   $("#to-cards")?.addEventListener("click", async e => {
-    busy(e.currentTarget, true, "Adding");
+    const btn = e.currentTarget;
+    busy(btn, true, "Adding");
     try {
       const r = await api("/api/learn/mistakes", { topic: LS.tid, items: wrong.map(({ q }) => ({ question: q.question, answer: q.options[q.answer_index], explanation: q.explanation })) });
-      e.currentTarget.outerHTML = `<span class="tag good">${plural(r.added, "card")} added to Flashcards</span>`; refresh();
-    } catch (err) { toast(err.message); busy(e.currentTarget, false); }
+      btn.outerHTML = `<span class="tag good">${plural(r.added, "card")} added to Flashcards</span>`; refresh();
+    } catch (err) { toast(err.message); busy(btn, false); }
   });
   scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -424,16 +431,22 @@ function showResults(sub, qs, picked, res, next) {
 /* ----- my notes ----- */
 function paneMine(sub, st) {
   const pane = $("#lpane");
-  pane.innerHTML = `<p class="muted small" style="margin-bottom:10px">Your own notes for this subtopic. They save automatically on this Mac.</p>
+  pane.innerHTML = `<div id="class-notes"></div>
+    <p class="muted small" style="margin-bottom:10px">Your own notes for this subtopic. They save automatically on this Mac.</p>
     <textarea id="mine" class="mine" placeholder="Write anything: what clicked, what to ask your teacher, formulas to remember" aria-label="My notes">${esc(st.my_notes || "")}</textarea>
     <p class="small faint" id="saved" role="status" style="margin-top:6px"></p>`;
   const ta = $("#mine"); let h;
   LS.focus = `The student's own notes:\n${(st.my_notes || "").slice(0, 2000)}`;
+  const tid = LS.tid, sid = sub.id;                    // the page may move on before the save fires
+  const note = t => { const el = $("#saved"); if (el) el.textContent = t; };
   ta.oninput = () => {
-    clearTimeout(h); $("#saved").textContent = "Saving";
-    h = setTimeout(async () => { try { await api("/api/learn/save", { topic: LS.tid, sub: LS.sid, my_notes: ta.value }); $("#saved").textContent = "Saved"; LS.focus = `The student's own notes:\n${ta.value.slice(0, 2000)}`; } catch (e) { $("#saved").textContent = e.message; } }, 700);
+    clearTimeout(h); note("Saving");
+    h = setTimeout(async () => {
+      try { await api("/api/learn/save", { topic: tid, sub: sid, my_notes: ta.value }); note("Saved"); if (LS.sid === sid) LS.focus = `The student's own notes:\n${ta.value.slice(0, 2000)}`; }
+      catch (e) { note(e.message); }
+    }, 700);
   };
-  ta.focus();
+  paintClassNotes($("#class-notes"), LS.tid, sub.id);
 }
 
 /* ---------- profile section ---------- */

@@ -26,6 +26,7 @@ function syncPaintButton() {
   if (!st) return;
   const label = st.state === "login_window" ? "Signing in…" : st.running ? "Updating…" : needsLogin(st) ? "Connect IntoStudy" : "Update files";
   b.innerHTML = `${st.running ? `<span class="spinner" aria-hidden="true"></span>` : icon(needsLogin(st) ? "external" : "refresh")}<span class="sync-label">${label}</span>`;
+  b.setAttribute("aria-label", label);
   b.disabled = !!st.running;
   b.dataset.tip = st.running ? (st.step || "Working…") : needsLogin(st) ? "Sign in once so Study Desk can fetch new files from IntoStudy" : `Last checked ${syncAgo(st.last_ok)}. Checks automatically every ${st.every_hours} h.`;
 }
@@ -47,7 +48,8 @@ function syncPoll() {
     if (SY.st?.running) return;                 // syncLoad keeps polling
     if (wasRunning) {
       toast(SY.st.error ? `Update failed: ${SY.st.error}` : SY.st.step || "Done.");
-      if (["today", "settings"].includes(current.page) || (SY.st.added || []).length) route();
+      const safe = ["today", "settings", "files", "subjects", "subject"].includes(current.page);   // never wipe a test or lesson in progress
+      if (safe) route(); else if ((SY.st.added || []).length) refresh();
     }
   }, 2000);
 }
@@ -81,13 +83,13 @@ function newFilesHTML() {
   return `<section class="section" aria-labelledby="new-h">${head}<div class="rows">${groups.slice(0, 8).map(g => {
     const n = g.files.length, upd = g.files.filter(x => x.kind === "updated").length;
     const names = g.files.slice(0, 3).map(x => esc(x.name)).join(", ") + (n > 3 ? ` and ${n - 3} more` : "");
-    const one = n === 1 && !g.topic && g.files[0].text ? `/file?p=${encodeURIComponent(g.files[0].text)}` : null;
+    const one = n === 1 && !g.topic && g.files[0].text ? fileHref(g.files[0].text) : null;
     const href = g.topic ? `#/topic/${g.topic.id}/files` : one;
     const body = `
       <div class="row-title">${subjPill(g.course)}<span>${g.topic ? esc(g.topic.name) : "Not linked to a topic yet"}</span></div>
       <div class="row-meta"><span>${names}</span><span>${syncAgo(g.date)}</span></div>
       <div class="row-side"><span class="tag ${upd === n ? "" : "due"}">${upd === n ? `${n} updated` : `${n - upd} new`}</span></div>`;
-    return href ? `<a class="row-link" href="${href}" ${g.topic ? "" : `target="_blank" rel="noopener"`}>${body}</a>` : `<div class="row-link">${body}</div>`;
+    return href ? `<a class="row-link" href="${href}">${body}</a>` : `<div class="row-link">${body}</div>`;
   }).join("")}</div></section>`;
 }
 
@@ -111,3 +113,54 @@ function syncSettingsHTML() {
     </div>
   </section>`;
 }
+
+/* Compass: read by the Chrome helper in your own browser (Settings card) */
+function compassSettingsHTML() {
+  const c = S.compass;
+  if (!c || S.hosted) return "";
+  const state = c.asked ? "Waiting for the helper to read Compass (up to a minute)…"
+    : c.connected ? `Connected${c.via === "extension" ? " through the Chrome helper" : ""}. Last read ${syncAgo(c.last_ok)}${c.classes ? `, ${c.classes} weekly classes in your timetable` : ""}.`
+    : c.via === "extension" && c.state === "login" ? "The helper is installed, but Compass isn't signed in in Chrome."
+    : "Not connected. Install the Chrome helper (setup guide, step 4).";
+  return `<section class="panel pad" style="display:grid;gap:12px" id="compass-settings">
+    <h2>Compass</h2>
+    <p class="muted small">A small helper in your own Chrome reads your timetable, class news and learning tasks from Compass every ${c.every_hours} hours while Chrome is open, and gives them only to Study Desk. You can always paste a post instead (Programme page).</p>
+    <p class="small">${state}</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn primary" type="button" data-compass-read ${c.asked ? "disabled" : ""}>Read Compass now</button>
+      <a class="btn" href="/setup">Install the helper</a>
+      <button class="btn" type="button" data-compass>Paste a post instead</button>
+    </div></section>`;
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-compass-read]");
+  if (!b || b.disabled) return;
+  busy(b, true, "Asking");
+  try { await api("/api/compass/helper", { action: "read" }); toast("Asked the Chrome helper to read Compass (up to a minute)."); }
+  catch (err) { toast(err.message); }
+  const poll = async (n = 0) => { await refresh(); if (S.compass?.asked && n < 30) setTimeout(() => poll(n + 1), 3000); else if (current.page === "settings") renderSettings(); };
+  setTimeout(poll, 3000);
+});
+
+/* Settings: update the app (Mac app only) */
+function updateSettingsHTML() {
+  if (!S.app) return "";
+  return `<section class="panel pad" style="display:grid;gap:12px" id="update-settings">
+    <h2>Study Desk ${esc(S.version || "")}</h2>
+    <p class="muted small">Updates replace the app's code only. Your progress, notes, course files and sign-ins stay where they are.</p>
+    <p class="small" id="upd-msg" role="status"></p>
+    <div><button class="btn" type="button" id="upd-btn">Check for updates</button></div></section>`;
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("#upd-btn");
+  if (!b || b.disabled) return;
+  const msg = $("#upd-msg");
+  busy(b, true, "Checking");
+  try {
+    const r = await api("/api/update", { check: !b.dataset.ready });
+    if (!r.newer) { msg.textContent = `You have the latest version (${r.current}).`; busy(b, false); return; }
+    if (!r.started) { msg.textContent = `Version ${r.latest} is available (you have ${r.current}).`; b.dataset.ready = "1"; busy(b, false); b.textContent = `Update to ${r.latest}`; return; }
+    msg.textContent = `Updating to ${r.latest}. Study Desk restarts by itself; this page reloads in a moment.`;
+    setTimeout(function wait() { fetch("/api/state").then(x => x.ok ? location.reload() : setTimeout(wait, 2000)).catch(() => setTimeout(wait, 2000)); }, 8000);
+  } catch (err) { msg.textContent = err.message; busy(b, false); }
+});

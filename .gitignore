@@ -10,6 +10,7 @@ text
 Study packs
 # generated / local
 study-app/.venv
+study-app/dist
 __pycache__/
 *.pyc
 *.tmp

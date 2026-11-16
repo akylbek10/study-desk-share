@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Turn downloaded PDFs, slides and Word docs into plain text in ./text,
-mirroring the ./courses folder layout. Run: .venv/bin/python extract_text.py
+"""Turn downloaded PDFs, slides and Word docs into plain text in text/, mirroring the courses/ folder layout.
+Run: .venv/bin/python extract_text.py   (sync.py runs it after every download)
 """
-from pathlib import Path
+import paths
 
-ROOT = Path(__file__).resolve().parent
-SRC, DST = ROOT / "courses", ROOT / "text"
+SRC, DST = paths.COURSES, paths.TEXT
 
 
 def pdf(p):

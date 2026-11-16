@@ -23,7 +23,10 @@ function diagramSVG(d) {
   const pts = {};
   for (const p of d.points || []) if (p && p.name != null && num(p.x) && num(p.y)) pts[p.name] = { x: p.x, y: p.y, show: p.show };
   // scale so the drawing is ~340 units wide/tall whatever units Gemini used; flip y (spec is y-up)
-  const raw = [...Object.values(pts), ...(d.boxes || []).flatMap(b => [{ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y + b.h }]), ...(d.texts || [])].filter(p => num(p.x) && num(p.y));
+  const rings = (d.circles || []).filter(c => pts[c.center] && num(c.r)).flatMap(c => {   // a whole circle must fit, not just its centre
+    const o = pts[c.center]; return [{ x: o.x - c.r, y: o.y - c.r }, { x: o.x + c.r, y: o.y + c.r }];
+  });
+  const raw = [...Object.values(pts), ...rings, ...(d.boxes || []).flatMap(b => [{ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y + b.h }]), ...(d.texts || [])].filter(p => num(p.x) && num(p.y));
   if (!raw.length) return "";
   const minX = Math.min(...raw.map(p => p.x)), maxX = Math.max(...raw.map(p => p.x)), minY = Math.min(...raw.map(p => p.y)), maxY = Math.max(...raw.map(p => p.y));
   const k = 340 / Math.max(maxX - minX, maxY - minY, 1e-9);

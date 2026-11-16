@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Opening Study Desk the first time: click Done, then System Settings, Privacy and Security, Open Anyway</title>
+  <rect width="960" height="470" rx="18" fill="#f2f3f5"/>
+  <!-- step 1: the warning -->
+  <text x="40" y="44" font-size="18" font-weight="700" fill="#1d1d1f">1. You open Study Desk</text>
+  <rect x="40" y="62" width="300" height="300" rx="14" fill="#ffffff" stroke="#d2d2d7"/>
+  <rect x="160" y="84" width="60" height="60" rx="14" fill="#2445C8"/>
+  <path d="M176 128 L196 108 a4 4 0 0 1 6 6 L182 134 l-8 2z" fill="none" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>
+  <text x="190" y="176" font-size="15" font-weight="700" fill="#1d1d1f" text-anchor="middle">“Study Desk” Not Opened</text>
+  <text x="190" y="202" font-size="12.5" fill="#3a3a3c" text-anchor="middle">Apple could not verify “Study Desk”</text>
+  <text x="190" y="220" font-size="12.5" fill="#3a3a3c" text-anchor="middle">is free of malware…</text>
+  <rect x="62" y="296" width="124" height="38" rx="9" fill="#e9e9ee"/>
+  <text x="124" y="320" font-size="13.5" fill="#1d1d1f" text-anchor="middle">Move to Trash</text>
+  <rect x="196" y="296" width="124" height="38" rx="9" fill="#0a7cff"/>
+  <text x="258" y="320" font-size="13.5" font-weight="600" fill="#fff" text-anchor="middle">Done</text>
+  <circle cx="258" cy="315" r="30" fill="none" stroke="#e5484d" stroke-width="3"/>
+  <text x="40" y="392" font-size="14" fill="#3a3a3c">Click <tspan font-weight="700">Done</tspan>, never “Move to Trash”.</text>
+  <text x="40" y="414" font-size="14" fill="#3a3a3c">It says this because the app isn't</text>
+  <text x="40" y="436" font-size="14" fill="#3a3a3c">from the App Store.</text>
+  <!-- arrow -->
+  <path d="M356 210 h44" stroke="#8e8e93" stroke-width="3" fill="none"/><path d="M398 202 l12 8 -12 8z" fill="#8e8e93"/>
+  <!-- step 2: settings -->
+  <text x="426" y="44" font-size="18" font-weight="700" fill="#1d1d1f">2. System Settings → Privacy &amp; Security</text>
+  <rect x="426" y="62" width="494" height="300" rx="14" fill="#ffffff" stroke="#d2d2d7"/>
+  <rect x="426" y="62" width="150" height="300" rx="14" fill="#f5f5f7"/>
+  <rect x="566" y="62" width="10" height="300" fill="#f5f5f7"/>
+  <circle cx="450" cy="86" r="6" fill="#ff5f57"/><circle cx="470" cy="86" r="6" fill="#febc2e"/><circle cx="490" cy="86" r="6" fill="#28c840"/>
+  <text x="446" y="130" font-size="13" fill="#3a3a3c">General</text>
+  <text x="446" y="158" font-size="13" fill="#3a3a3c">Appearance</text>
+  <rect x="438" y="172" width="128" height="26" rx="6" fill="#0a7cff"/>
+  <text x="446" y="190" font-size="13" fill="#ffffff" font-weight="600">Privacy &amp; Security</text>
+  <text x="446" y="222" font-size="13" fill="#3a3a3c">Desktop &amp; Dock</text>
+  <text x="446" y="250" font-size="13" fill="#3a3a3c">Displays</text>
+  <text x="596" y="104" font-size="16" font-weight="700" fill="#1d1d1f">Privacy &amp; Security</text>
+  <text x="596" y="134" font-size="12" fill="#8e8e93">scroll down to “Security”</text>
+  <text x="596" y="172" font-size="13.5" font-weight="700" fill="#1d1d1f">Security</text>
+  <rect x="596" y="184" width="304" height="110" rx="10" fill="#f5f5f7"/>
+  <text x="612" y="210" font-size="12.5" fill="#3a3a3c">Allow applications from</text>
+  <text x="612" y="228" font-size="12.5" fill="#3a3a3c">App Store &amp; Known Developers</text>
+  <line x1="612" y1="242" x2="884" y2="242" stroke="#d2d2d7"/>
+  <text x="612" y="266" font-size="12.5" fill="#1d1d1f">“Study Desk” was blocked to</text>
+  <text x="612" y="283" font-size="12.5" fill="#1d1d1f">protect your Mac.</text>
+  <rect x="790" y="254" width="100" height="32" rx="8" fill="#ffffff" stroke="#c7c7cc"/>
+  <text x="840" y="275" font-size="13" font-weight="600" fill="#1d1d1f" text-anchor="middle">Open Anyway</text>
+  <circle cx="840" cy="270" r="40" fill="none" stroke="#e5484d" stroke-width="3"/>
+  <text x="426" y="392" font-size="14" fill="#3a3a3c">Click <tspan font-weight="700">Open Anyway</tspan>, confirm with your Mac password or Touch ID,</text>
+  <text x="426" y="414" font-size="14" fill="#3a3a3c">then <tspan font-weight="700">Open</tspan>. You do this only once. The button stays there for</text>
+  <text x="426" y="436" font-size="14" fill="#3a3a3c">about an hour after step 1; if it's gone, open Study Desk again.</text>
+</svg>

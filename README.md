@@ -1,63 +1,28 @@
 # Study Desk
 
-Личный трекер учёбы для INTO Manchester (foundation year). Работает на твоём Mac, в браузере на http://127.0.0.1:8890.
+A study tracker for INTO Manchester foundation-year students, on your own Mac. It downloads your course files from IntoStudy, reads your timetable, class news and homework from Compass, lays out your programme week by week (topics, assessments, exams, breaks), and gives every topic an AI tutor, lessons, tests and revision notes. Works for any subjects: science, business, sociology, global studies, English.
 
-- сам скачивает файлы курсов с IntoStudy и раскладывает их по темам;
-- показывает, какая тема сейчас и какая следующая по программе каждого предмета, какие недели и оценивания впереди;
-- отметки «изучено» и «подтверждено» (короткая проверка на 8 вопросов), где отстаёшь, готовность к экзаменам;
-- конспекты по каждой теме, поиск по файлам курса, мелкие задачи от учителей;
-- кнопка Gemini: собирает промпт с файлами темы для твоего чата Gemini, а результат возвращается в трекер.
+## Install (Mac, Intel or Apple silicon, macOS 12 or newer)
 
-Всё ИИ работает через твой собственный бесплатный ключ Gemini. Твои данные никуда не уходят, кроме Gemini.
+1. **Download** `Study-Desk-….zip` from [the latest release](https://github.com/akylbek10/study-desk-share/releases/latest) and double-click it. Drag **Study Desk** into **Applications**.
+2. **Open** Study Desk. The first time, macOS stops it because it isn't from the App Store: click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**, then confirm. Only once.
 
-## Что нужно
+   ![Click Done, then System Settings → Privacy & Security → Open Anyway](docs/open-anyway.svg)
 
-- Mac;
-- Python 3.9 или новее (проверить: `python3 --version`; если нет, macOS сама предложит установить);
-- Google Chrome: через него Study Desk входит в IntoStudy;
-- ключ Gemini API, бесплатный: https://aistudio.google.com/apikey.
+3. **Follow the guide.** The first start takes a few minutes (Study Desk installs what it needs), then the setup guide opens in your browser: your name, the AI engine (free, with a Google account), IntoStudy, Compass, and your programme. You sign in to each service yourself; Study Desk never sees your passwords.
 
-## Установка (один раз, ~10 минут)
+You need: internet, a Google account, your university Microsoft account, and Google Chrome. Compass only lets real browsers in, so Study Desk reads it through a small helper extension in your own Chrome (the guide shows how to add it; one minute). Without Chrome you can add your timetable from a screenshot.
 
-1. Скачай репозиторий в любую папку:
+**Updates:** Settings → Check for updates. Your data stays where it is.
+**Your data** lives only on your Mac, in `~/Library/Application Support/Study Desk`. AI requests go to Google (Antigravity or your Gemini key).
+**Uninstall:** drag Study Desk to the Bin, delete the folder above and `~/Library/LaunchAgents/com.studydesk.app.plist`, then restart the Mac.
 
-   ```bash
-   git clone https://github.com/akylbek10/study-desk-share.git "Study Desk"
-   ```
+---
 
-2. Поставь зависимости (для скачивания файлов с IntoStudy и чтения PDF и слайдов):
+## По-русски
 
-   ```bash
-   cd "Study Desk/study-app" && python3 -m venv .venv && .venv/bin/pip install playwright pypdf python-pptx python-docx
-   ```
+1. Скачай `Study-Desk-….zip` из [последнего релиза](https://github.com/akylbek10/study-desk-share/releases/latest), открой его и перетащи **Study Desk** в **Программы**.
+2. Открой Study Desk. В первый раз macOS не даст его открыть, потому что он не из App Store: нажми **Готово**, открой **Системные настройки → Конфиденциальность и безопасность**, пролистай вниз и нажми **Всё равно открыть**, подтверди паролем. Это один раз (картинка выше).
+3. Первый запуск занимает несколько минут, потом в браузере откроется помощник настройки: имя, ИИ (бесплатно, через Google-аккаунт), IntoStudy, Compass и твоя программа. Входишь везде сам, пароли Study Desk не видит. Для Compass нужен Google Chrome: Study Desk читает его через маленькое расширение в твоём Chrome (помощник покажет, как его добавить).
 
-3. Запусти Study Desk: двойной клик по `study-app/Start Study Desk.command`. Если macOS не даёт открыть файл, выполни в Терминале `python3 server.py` в папке `study-app` и открой http://127.0.0.1:8890.
-
-4. В приложении открой **Settings**, вставь ключ Gemini, укажи своё имя.
-
-5. Нажми **Connect IntoStudy** (кнопка вверху приложения): откроется окно Chrome, войди через свой студенческий Microsoft-аккаунт. Пароль Study Desk не видит и не хранит. Дальше первая синхронизация скачает файлы всех твоих предметов. Это займёт 10–20 минут, прогресс видно в приложении.
-
-6. Когда синхронизация закончится, собери свою программу курса. Gemini прочитает твои файлы (planner'ы, overview, папки по неделям) и составит предметы, темы и план по неделям:
-
-   ```bash
-   .venv/bin/python setup_topics.py --force
-   ```
-
-   Добавь расписание по скриншоту (например, из Compass):
-
-   ```bash
-   .venv/bin/python setup_topics.py --timetable ~/Desktop/timetable.png
-   ```
-
-7. Перезапусти Study Desk (закрой окно Терминала и снова двойной клик), открой **Programme** и проверь, что недели и темы похожи на правду. Поправить можно в `study-app/topics.json`: там обычный текст, а в `topics.example.json` лежит готовый пример с другого набора предметов.
-
-## Как пользоваться
-
-Подробно в [study-app/README.md](study-app/README.md). Коротко: учишь тему где удобно (в Gemini, на уроке), отмечаешь её галочкой, проходишь Check, и тема становится «подтверждённой». На главной видно, что сегодня, что дальше и где отстаёшь.
-
-## Полезно знать
-
-- **Лимит Gemini.** На бесплатном ключе у модели `gemini-3.5-flash` около 20 запросов в день. Когда они кончаются, Study Desk сам переходит на более простые модели. Если ответы стали хуже, это лимит; на следующий день всё вернётся.
-- **Данные.** Твой прогресс лежит в `study-app/data`, файлы курсов в `courses/` и `text/`. В git они не попадают.
-- **Обновления.** `git pull` в папке Study Desk, потом перезапуск. Твои `topics.json` и данные при этом не трогаются.
-- **Telegram (по желанию).** В `study-app/hermes` лежит подключение к агенту Hermes. Это необязательно, всё работает и без него.
+Running from source (developers): `cd study-app && uv run python server.py`, then open http://127.0.0.1:8890. Build the app with `study-app/macapp/build.sh`.

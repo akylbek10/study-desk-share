@@ -1,0 +1,17 @@
+[project]
+name = "study-desk"
+version = "1.0.0"
+description = "Study tracker for the INTO Manchester foundation year"
+requires-python = "~=3.12.0"
+# The server itself needs only the standard library. These are for the IntoStudy/Compass browser (Playwright)
+# and for turning PDFs, slides and Word files into text.
+dependencies = [
+    "playwright>=1.48",
+    "pypdf>=5.0",
+    "python-pptx>=1.0",
+    "python-docx>=1.1",
+]
+classifiers = [ "Private :: Do Not Upload" ]
+
+[tool.uv]
+package = false

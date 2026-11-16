@@ -4,12 +4,17 @@
 Run:   python3 server.py        then open http://127.0.0.1:8890
 Your Gemini API key is stored in study-app/.env on this Mac only.
 """
+import base64
 import fnmatch
 import json
 import mimetypes
 import os
 import random
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -21,24 +26,52 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent
-TEXT = APP.parent / "text"
-COURSES = APP.parent / "courses"
-OVERVIEW = APP.parent / "PROGRAM_OVERVIEW.md"
+import cloud
+import paths
+
+APP = paths.APP
+# Hosted = the phone version on Vercel: data comes from Supabase, there's no Mac disk, agy, whisper or sync,
+# and no AI at all (no Gemini API either, by choice: v1 must never spend API quota).
+HOSTED = bool(os.environ.get("VERCEL") or os.environ.get("STUDY_HOSTED"))
+TEXT = paths.TEXT
+COURSES = paths.COURSES
+OVERVIEW = paths.OVERVIEW
 STATIC = APP / "static"
-DATA = APP / "data"
-ENV = APP / ".env"
-PORT = int(os.environ.get("PORT", 8890))
+DATA = paths.DATA
+ENV = paths.ENV
+TOPICS_FILE = paths.TOPICS
+if HOSTED:
+    DATA = Path(tempfile.gettempdir()) / "studydesk"          # the only writable place there; nothing kept
+    TEXT = COURSES = OVERVIEW = DATA / "no-course-files-online"
+    ENV = DATA / "no.env"
+MAC_ONLY = "This needs Study Desk on your Mac. The phone version doesn't make anything new with AI."
+PORT = int(os.environ.get("STUDY_PORT") or os.environ.get("PORT") or 8890)
 API = "https://generativelanguage.googleapis.com/v1beta"
 MAX_CONTEXT_CHARS = 600_000
-LOCK = threading.Lock()
 
-DATA.mkdir(exist_ok=True)
-if not (APP / "topics.json").exists():          # first run: no subjects yet, so the app can only sync and take the key
-    (APP / "topics.json").write_text(json.dumps({"term": {"name": "Semester 1", "week1": date.today().isoformat()},
-                                                 "subjects": {}, "exams": [], "timetable": []}, indent=2))
-    print("No topics.json yet: wrote an empty one. After the first sync run:  python3 setup_topics.py --force")
-CONFIG = json.loads((APP / "topics.json").read_text())
+
+class _DataLock:
+    """Guards every read-modify-write of the data. On entry the cloud forgets what this request read earlier,
+    so a request that waited minutes for AI doesn't save over a newer copy (and isn't refused for it)."""
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        self._lock.acquire()
+        cloud.fresh()
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+LOCK = _DataLock()
+
+DATA.mkdir(parents=True, exist_ok=True)
+if not TOPICS_FILE.exists():          # first run: no subjects yet; the setup guide (/setup) builds them
+    TOPICS_FILE.write_text(json.dumps({"term": {"name": "Semester 1", "week1": date.today().isoformat()},
+                                       "subjects": {}, "exams": [], "timetable": []}, indent=2))
+    print("No topics.json yet: wrote an empty one. Open /setup to build your programme.")
+CONFIG, TOPICS = {}, {}
 
 
 def week_start(n):
@@ -63,30 +96,93 @@ def week_of(day):
     return None
 
 
-for _sub in CONFIG["subjects"].values():          # a topic in the weekly plan starts in its first planned week
-    for _t in _sub["topics"]:
-        _weeks = [w["week"] for w in _sub.get("plan", []) if _t["id"] in w["topics"]]
-        if _weeks and "term" in CONFIG:
-            _t["start"] = week_start(min(_weeks)).isoformat()
-    _prev = CONFIG.get("term", {}).get("week1", date.today().isoformat())
-    for _t in _sub["topics"]:                      # not in the plan and no date given: after the topic before it
-        _prev = _t.setdefault("start", _prev)
-TOPICS = {t["id"]: {**t, "subject": s} for s, sub in CONFIG["subjects"].items() for t in sub["topics"]}
+def load_config():
+    """(Re)read topics.json: at start and after the setup guide or Compass changes it."""
+    cfg = json.loads(TOPICS_FILE.read_text())
+    CONFIG.clear()
+    CONFIG.update(cfg)
+    for sub in CONFIG["subjects"].values():          # a topic in the weekly plan starts in its first planned week
+        for t in sub["topics"]:
+            weeks = [w["week"] for w in sub.get("plan", []) if t["id"] in w["topics"]]
+            if weeks and "term" in CONFIG:
+                t["start"] = week_start(min(weeks)).isoformat()
+        prev = CONFIG.get("term", {}).get("week1", date.today().isoformat())
+        for t in sub["topics"]:                      # not in the plan and no date given: after the topic before it
+            prev = t.setdefault("start", prev)
+    TOPICS.clear()
+    TOPICS.update({t["id"]: {**t, "subject": s} for s, sub in CONFIG["subjects"].items() for t in sub["topics"]})
+
+
+load_config()
+
+
+# What kind of subject it is decides how questions and notes are written. topics.json can say it per subject
+# ("kind": "maths" | "science" | "essay" | "english"); otherwise it is guessed from the name.
+_SCIENCE = re.compile(r"physic|chemi|biolog|science|electr|engineer|computing|computer", re.I)
+_MATHS = re.compile(r"math|statistic|further|calculus", re.I)
+_ENGLISH = re.compile(r"\bEAP\b|english|academic skills|language", re.I)
+
+
+def subject_kind(name):
+    sub = CONFIG["subjects"].get(name, {})
+    if sub.get("kind") in ("maths", "science", "essay", "english"):
+        return sub["kind"]
+    if sub.get("english") or _ENGLISH.search(name):
+        return "english"
+    if _MATHS.search(name):
+        return "maths"
+    return "science" if _SCIENCE.search(name) else "essay"
+
+
+def kind_of(tid):
+    return subject_kind(TOPICS[tid]["subject"])
 
 
 # ---------- storage ----------
+# In Supabase (when set up) so the phone sees the same thing: these files plus learn/, review/ and class notes.
+# Sync bookkeeping, the file sorter, worksheet copies and audio stay in data/ on the Mac.
+SHARED = {"cards.json", "progress.json", "tasks.json", "activity.json", "compass.json"}
+
+
 def load(name, default):
+    if name in SHARED and cloud.on():
+        return cloud.get(name, default)
+    return read_json(DATA / name, default)
+
+
+def read_json(p, default):
+    name = p.name
     try:
-        return json.loads((DATA / name).read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        return json.loads(p.read_text())
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError:                  # keep the broken file for recovery instead of overwriting it
+        bad = p.with_name(f"{p.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+        try:
+            p.replace(bad)
+            print(f"{name} was unreadable; moved it to {bad.name}")
+        except OSError:
+            pass
         return default
 
 
+def write_atomic(p, text):
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def save(name, obj):
-    p = DATA / name
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1))
-    tmp.replace(p)
+    if name in SHARED and cloud.on():
+        return cloud.put(name, obj)
+    write_atomic(DATA / name, json.dumps(obj, ensure_ascii=False, indent=1))
 
 
 def read_env():
@@ -97,6 +193,10 @@ def read_env():
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
     return env
+
+
+cloud.setup(os.environ.get("SUPABASE_URL") or read_env().get("SUPABASE_URL"),
+            os.environ.get("SUPABASE_SERVICE_KEY") or read_env().get("SUPABASE_SERVICE_KEY"))
 
 
 def api_key():
@@ -184,7 +284,7 @@ def topic_label(tid):
 def original_for(text_rel):
     """courses/ path of the original file behind a text/ file, if it exists."""
     p = (COURSES / text_rel.removesuffix(".txt")).resolve()
-    return p if str(p).startswith(str(COURSES.resolve())) and p.is_file() else None
+    return p if p.is_relative_to(COURSES.resolve()) and p.is_file() else None
 
 
 # ---------- Gemini ----------
@@ -222,7 +322,121 @@ class GeminiError(Exception):
     pass
 
 
+# ---------- Antigravity CLI (agy): your Gemini subscription; the API key is the fallback ----------
+# Tested 10 Nov 2026 with agy 1.5.3: print mode reads the prompt as stream-json from stdin (no argv size limit),
+# --json-schema returns "structured_output"; images only as files in the working folder.
+def find_agy():
+    """agy from PATH, Homebrew, or the copy the Mac app downloaded into STUDY_HOME/bin."""
+    for c in (os.environ.get("AGY_BIN"), shutil.which("agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy",
+              str(paths.HOME / "bin" / "agy")):
+        if c and os.path.exists(c):
+            return c
+    return str(paths.HOME / "bin" / "agy")
+
+
+AGY = find_agy()
+AGY_WORK = DATA / "agy-work"
+AGY_SLOTS = threading.Semaphore(2)                                    # at most 2 agy runs at once
+AGY_TIMEOUT = 480                                                     # seconds; setup_topics.py allows more
+AGY_PROJECT = os.environ.get("AGY_PROJECT") or read_env().get("AGY_PROJECT") or "Study Desk"   # keeps these chats apart in Antigravity
+
+
+def agy_model(think):
+    """Models come from .env (the setup guide writes them from `agy models`); read on every call."""
+    if think:   # tutor, tests, notes
+        return os.environ.get("AGY_MODEL") or read_env().get("AGY_MODEL") or "gemini-4-argon-high"
+    return os.environ.get("AGY_FAST_MODEL") or read_env().get("AGY_FAST_MODEL") or "gemini-3.8-flash-medium"   # sorting
+
+
+class AgyError(Exception):
+    pass
+
+
+def agy_on():
+    global AGY
+    if not os.path.exists(AGY):
+        AGY = find_agy()                      # installed by the setup guide after the server started
+    return os.environ.get("STUDY_ENGINE", read_env().get("STUDY_ENGINE", "agy")) == "agy" and os.path.exists(AGY)
+
+
+def _no_ordering(s):
+    if isinstance(s, dict):
+        return {k: _no_ordering(v) for k, v in s.items() if k != "propertyOrdering"}
+    return [_no_ordering(x) for x in s] if isinstance(s, list) else s
+
+
+def agy_call(contents, system=None, schema=None, think=True):
+    if HOSTED:
+        raise GeminiError(MAC_ONLY)
+    AGY_WORK.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=AGY_WORK))
+    try:
+        turns, n_img = [], 0
+        for m in contents:
+            chunk = []
+            for p in m.get("parts", []):
+                if p.get("text"):
+                    chunk.append(p["text"])
+                d = p.get("inlineData") or p.get("inline_data")
+                if d and d.get("data"):
+                    n_img += 1
+                    mime = d.get("mimeType") or d.get("mime_type") or "image/jpeg"
+                    name = f"image{n_img}{mimetypes.guess_extension(mime) or '.jpg'}"
+                    (work / name).write_bytes(base64.b64decode(d["data"]))
+                    chunk.append(f"[Image attached: open the file {name} in your folder and look at it carefully.]")
+            turns.append(("STUDENT" if m.get("role", "user") == "user" else "YOU (your earlier reply)", "\n".join(chunk)))
+        body = turns[0][1] if len(turns) == 1 else (
+            "CONVERSATION SO FAR:\n\n" + "\n\n".join(f"--- {w} ---\n{t}" for w, t in turns)
+            + "\n\nWrite your next reply to the student's last message.")
+        prompt = ("You are the AI engine of Study Desk, a study app. Work only from the text below: do not run commands, "
+                  "edit files, browse or search" + (", apart from opening the attached image files" if n_img else "")
+                  + ". Reply directly with the answer itself.\n\n"
+                  + (f"INSTRUCTIONS:\n{system}\n\n" if system else "") + body)
+        cmd = [AGY, "-p=", "--input-format", "stream-json", "--output-format", "stream-json",
+               "--model", agy_model(think), "--sandbox", "--project", AGY_PROJECT]
+        if schema:
+            cmd += ["--json-schema", json.dumps(_no_ordering(schema))]
+        msg = json.dumps({"event": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+        with AGY_SLOTS:
+            try:
+                r = subprocess.run(cmd, input=msg, capture_output=True, text=True, cwd=work, timeout=AGY_TIMEOUT, env=agy_env())
+            except subprocess.TimeoutExpired:
+                raise AgyError(f"no answer in {AGY_TIMEOUT // 60} minutes")
+        res = next((json.loads(l)["result"] for l in r.stdout.splitlines() if l.startswith('{"event":"result"')), None)
+        if not res or res.get("status") != "SUCCESS":
+            raise AgyError((res or {}).get("error") or (r.stderr or r.stdout)[-300:] or f"exit {r.returncode}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if schema:
+        out = res.get("structured_output")
+        return out if out is not None else json.loads(res.get("response", ""))   # broken JSON: ValueError, retried
+    return res.get("response", "").strip()
+
+
+# The model often writes LaTeX in JSON without doubling the backslash, so "\text" arrives as a tab + "ext",
+# "\frac" as a form feed + "rac", "\rightarrow" as a carriage return + "ightarrow". Put the backslash back.
+TEX_LOST = [(re.compile(r"\t(?=ext(?:bf|it|rm|sf|tt)?\{|imes|heta|frac|ilde|riangle|(?:an|au|o)(?![a-z]))"), r"\\t"),
+            (re.compile(r"\r(?=[a-z])"), r"\\r"), (re.compile("\x0c(?=[a-z])"), r"\\f"), (re.compile("\x08(?=[a-z])"), r"\\b")]
+
+
+def fix_tex(x):
+    if isinstance(x, str):
+        for pat, rep in TEX_LOST:
+            x = pat.sub(rep, x)
+        return x
+    if isinstance(x, list):
+        return [fix_tex(v) for v in x]
+    if isinstance(x, dict):
+        return {k: fix_tex(v) for k, v in x.items()}
+    return x
+
+
 def gemini(contents, system=None, schema=None, temperature=0.6, think=True):
+    out = _gemini_retry(contents, system, schema, temperature, think)
+    return fix_tex(out) if schema else out
+
+
+def _gemini_retry(contents, system, schema, temperature, think):
     try:
         return _gemini(contents, system, schema, temperature, think)
     except ValueError:                       # cut-off or broken JSON: one more try
@@ -234,6 +448,15 @@ def gemini(contents, system=None, schema=None, temperature=0.6, think=True):
 
 def _gemini(contents, system=None, schema=None, temperature=0.6, think=True):
     """think=True lets the model reason before answering (slower, far fewer mistakes); False for simple sorting jobs."""
+    if HOSTED:
+        raise GeminiError(MAC_ONLY)
+    if agy_on():
+        try:
+            return agy_call(contents, system, schema, think)
+        except AgyError as e:
+            print(f"agy failed ({str(e)[:200]}); using the Gemini API instead", flush=True)
+            if not api_key():
+                raise GeminiError(f"Antigravity didn't answer: {str(e)[:200]}")
     if not api_key():
         raise GeminiError("No Gemini API key yet. Add it in Settings.")
     body = {"contents": contents, "generationConfig": {"temperature": temperature, "maxOutputTokens": 32000}}
@@ -301,8 +524,41 @@ STYLE = (
     "You are a patient, encouraging tutor for an International Foundation Year student "
     "(NCUK, INTO Manchester). English is their second language: use clear, simple English and short "
     "paragraphs. If the student writes in Russian, answer in Russian but keep subject terms in English too. "
-    "Write maths with LaTeX: $...$ inline and $$...$$ for display. Use Markdown for structure."
+    "Write maths with LaTeX: $...$ inline and $$...$$ for display. Every piece of maths goes inside $...$, also in "
+    "titles, answer options and short phrases (write $\\frac{1}{2}$ and $30^\\circ$, never bare \\frac{1}{2}). "
+    "Use Markdown for structure."
 )
+
+
+# Extra rules for subjects that are not maths or science (those keep the prompts as they were).
+KIND_RULES = {
+    "essay": (
+        "\nTHIS SUBJECT IS ASSESSED THROUGH WRITING, NOT CALCULATION (e.g. business, sociology, global studies, "
+        "economics, law, politics). Exam and coursework questions are: short definitions and 'explain' questions; "
+        "data-response questions on a table, chart or extract; case-study questions on a real or invented "
+        "organisation, country or group; source-analysis questions (who wrote it, when, why, how useful and reliable "
+        "it is); and essays ('Analyse...', 'Evaluate...', 'To what extent...', 'Discuss...'). Marks reward knowledge "
+        "(key terms, theories, theorists and models), application to the case or source, analysis (chains of "
+        "reasoning: because... which leads to... so...) and evaluation (weighing both sides, 'it depends on', a "
+        "justified conclusion). Use real-world examples and named theories from the course materials, Harvard-style "
+        "citations where the course uses them, and model paragraphs (point, explanation, evidence, evaluation) instead "
+        "of worked calculations. Use numbers only for data-response questions."),
+    "english": (
+        "\nTHIS IS AN ENGLISH FOR ACADEMIC PURPOSES (skills) SUBJECT: reading, writing, listening, speaking, "
+        "vocabulary, grammar and study skills such as paraphrasing, summarising, referencing and seminar language. "
+        "Teach and test the skill itself with real sentences and short texts: identify, choose, correct, rewrite, "
+        "paraphrase, structure a paragraph. No calculations and no figures."),
+}
+
+
+def kind_rules(tid):
+    return KIND_RULES.get(kind_of(tid), "")
+
+
+def figure_rules(tid):
+    """Drawn figures only for maths and science."""
+    return FIGURE_RULES if kind_of(tid) in ("maths", "science") else (
+        "\n\nFIGURES: this subject does not use drawn figures; always give kind 'none' (or leave the figure out).")
 
 
 def system_for(tid, extra=""):
@@ -312,7 +568,7 @@ def system_for(tid, extra=""):
     if material:
         src += ("\nHere are the student's own course materials. Base your teaching on them, follow their notation "
                 "and methods, and when you use a file mention its name in [square brackets].\n" + material)
-    return f"{STYLE}\nCurrent topic: {topic_label(tid)}.\n{extra}\n\n{src}"
+    return f"{STYLE}{kind_rules(tid)}\nCurrent topic: {topic_label(tid)}.\n{extra}\n\n{src}"
 
 
 # ---------- progress ----------
@@ -599,7 +855,8 @@ def api_state(_):
                            "cards": sum(c["topic"] == t["id"] for c in cards),
                            "due": sum(c["topic"] == t["id"] and c["due"] <= tdy for c in cards),
                            "learn": learn_summary(t["id"]), **topic_standing(p, t["id"])})
-        subjects.append({"name": s, "topics": topics})
+        subjects.append({"name": s, "short": sub.get("short") or SHORT_SUBJECT.get(s, s), "kind": subject_kind(s),
+                         "color": sub.get("color"), "topics": topics})
     readiness = []
     for e in sorted(p["exams"], key=lambda e: e["date"]):
         if e["date"] < tdy:
@@ -609,11 +866,15 @@ def api_state(_):
                           "confirmed": sum(t["status"] == "confirmed" for t in scope),
                           "studied": sum(t["status"] == "studied" for t in scope),
                           "behind": sum(t["behind"] for t in scope)})
-    return {"subjects": subjects, "exams": p["exams"], "breaks": CONFIG.get("breaks", []),
+    return {"hosted": HOSTED, "subjects": subjects, "exams": p["exams"], "breaks": CONFIG.get("breaks", []),
+            "term": CONFIG.get("term"),
             "assessments": upcoming_assessments(), "readiness": readiness, "pass_mark": PASS_MARK,
             "tasks": tasks_for_app(),
-            "timetable": CONFIG.get("timetable", []), "today": tdy, "has_key": bool(api_key()),
+            "timetable": CONFIG.get("timetable", []), "today": tdy, "has_key": bool(api_key()) or agy_on(),
             "model": p["settings"].get("model", ""), "name": p["settings"].get("name", ""),
+            "setup_needed": needs_setup(), "app": bool(os.environ.get("STUDY_HOME")), "version": app_version(),
+            "compass": compass_public(),
+            "telegram": (DATA / "agent_state.json").exists(), "unread": unread_count(),      # the Telegram agent (Hermes) has been used here
             "due_total": sum(c["due"] <= tdy for c in cards)}
 
 
@@ -622,12 +883,18 @@ def api_stats(_):
 
 
 TUTOR_SCHEMA = {"type": "object", "properties": {
-    "answer": {"type": "string"}, "figure": FIGURE,
+    "answer": {"type": "string"}, "figures": {"type": "array", "items": FIGURE},
     "has_problem": {"type": "boolean"}, "has_calculation": {"type": "boolean"},
     "mistake": {"type": "object", "properties": {"found": {"type": "boolean"}, "front": {"type": "string"},
                                                   "back": {"type": "string"}}, "required": ["found", "front", "back"]}},
-    "required": ["answer", "figure", "has_problem", "has_calculation", "mistake"],
-    "propertyOrdering": ["figure", "answer", "has_problem", "has_calculation", "mistake"]}
+    "required": ["answer", "figures", "has_problem", "has_calculation", "mistake"],
+    "propertyOrdering": ["figures", "answer", "has_problem", "has_calculation", "mistake"]}
+TUTOR_FIGURES = (
+    "\nFIGURES IN YOUR ANSWER: 'figures' is a list. When you explain an idea or work through a problem in maths or "
+    "science, give 2-3 figures: one for each picture a good teacher would draw on the board while explaining (for "
+    "example the real situation, then the forces/vectors or the graph, then the worked example), each complete and "
+    "with a one-line caption. Put a line [[FIG 1]], [[FIG 2]], [[FIG 3]] in 'answer' exactly where each figure "
+    "belongs, in the same order. A short reply, a hint, or English/EAP: an empty list.")
 DRAW_SCHEMA = {"type": "object", "properties": {"figure": FIGURE}, "required": ["figure"]}
 
 
@@ -671,6 +938,28 @@ TUTOR_RULES = (
     '{"a":"P","b":"F","arrow":true,"label":"F"}]}}')
 
 
+TUTOR_RULES_WRITTEN = (
+    "\nHOW TO TEACH (you are as careful as the best human tutor):\n"
+    "- Explaining: what the idea means in plain words, the key terms defined the way an examiner accepts, the theory "
+    "or model with who it comes from if the course names them, ONE real example or short case that shows it, then "
+    "the mistake students usually make in exams. Finish with one short exam-style question for the student to try "
+    "(do not answer it).\n"
+    "- When the student is answering a question, do NOT write the answer for them. 'Give me a hint' = one small nudge. "
+    "'Show the next step' = only the next paragraph or point. 'Show the full solution' = a model answer laid out the "
+    "way it would earn full marks.\n"
+    "- When the student sends their writing (typed or a photo): say what is good, then the FIRST place that loses marks "
+    "(missing definition, no application to the case, description instead of analysis, no evaluation or "
+    "conclusion, wrong fact, grammar that changes the meaning), why, and how to fix it; ask them to rewrite that part. "
+    "If you found a mistake set mistake.found = true, mistake.front = a short question (one sentence) that tests the "
+    "exact thing they got wrong, mistake.back = ONLY the correct point or rule in 1-3 lines (it becomes a flashcard). "
+    "Always fill 'mistake'; when there is no student work or no error, mistake.found = false.\n"
+    "- Never invent facts, statistics, dates or quotes; if you are not sure, say so.\n"
+    "- 'answer' is Markdown laid out for reading: short paragraphs separated by blank lines, '### ' headings for the "
+    "parts, **bold** key terms, bullet lists where they help. has_problem = true when your answer ends with a question "
+    "the student must now answer or they are in the middle of one. has_calculation = true only if it contains worked "
+    "numbers. 'figures' is an empty list.")
+
+
 def tidy_math(text):
     """Repair the LaTeX delimiters the model sometimes gets wrong, so formulas always render."""
     text = re.sub(r"\$[|\]]", "$$", text)                       # "$|" typed instead of "$$"
@@ -690,11 +979,13 @@ def tidy_math(text):
 def tutor_reply(tid, messages, system):
     """One tutor answer: structured (text + figure), double-checked when it contains calculations."""
     contents = history_contents(messages)
-    r = gemini(contents, system + FIGURE_RULES + TUTOR_RULES, TUTOR_SCHEMA, 0.4)
+    numeric = kind_of(tid) in ("maths", "science")
+    rules = FIGURE_RULES + TUTOR_RULES + TUTOR_FIGURES if numeric else figure_rules(tid) + TUTOR_RULES_WRITTEN
+    r = gemini(contents, system + rules, TUTOR_SCHEMA, 0.4)
     answer, checked = str(r.get("answer", "")).strip(), False
     if not answer:
         raise GeminiError("Gemini returned an empty answer. Try again.")
-    if (r.get("has_calculation") or r.get("has_problem")) and TOPICS[tid]["subject"] != "EAP":
+    if (r.get("has_calculation") or r.get("has_problem")) and numeric:
         try:                                   # a second, independent pass over the numbers
             question = messages[-1].get("text", "") if messages else ""
             c = gemini([{"role": "user", "parts": user_parts(
@@ -703,7 +994,7 @@ def tutor_reply(tid, messages, system):
                 "it too: it must be fully specified, physically possible and give a sensible answer (no negative "
                 "force, mass or length, no impossible triangle); if not, change its numbers so it works. correct = true only if "
                 "everything is right. If anything is wrong: issue = what is wrong (one line), corrected_answer = the "
-                "full answer rewritten correctly in the same style, language and Markdown/LaTeX.\n\n"
+                "full answer rewritten correctly in the same style, language and Markdown/LaTeX, keeping every [[FIG n]] line.\n\n"
                 f"STUDENT ASKED:\n{question[:3000]}\n\nTUTOR'S ANSWER:\n{answer}",
                 messages[-1].get("image") if messages else None)}],
                 f"{STYLE}\nTopic: {topic_label(tid)}.", CHECK_SCHEMA, 0.1)
@@ -712,7 +1003,9 @@ def tutor_reply(tid, messages, system):
                 answer = c["corrected_answer"].strip()
         except GeminiError:
             pass                               # over quota or busy: show the first answer unchecked
-    figure = clean_figure(r.get("figure"))
+    raw = [x for x in (r.get("figures") or [])[:4] if isinstance(x, dict) and x.get("kind") in ("diagram", "graph")]
+    figures = [f for f in map(clean_figure, raw) if f and not thin_figure(f)]
+    figure = None if figures else clean_figure(raw[0]) if raw else None
     if thin_figure(figure):                    # the drawing came out empty: ask for it on its own
         try:
             figure = clean_figure(gemini([{"role": "user", "parts": [{"text":
@@ -723,7 +1016,10 @@ def tutor_reply(tid, messages, system):
             figure = None
         if thin_figure(figure):
             figure = None
-    out = {"answer": tidy_math(answer), "figure": figure, "problem": bool(r.get("has_problem")),
+    if figure:
+        figures = [figure]
+    out = {"answer": tidy_math(answer), "figures": figures, "figure": figures[0] if figures else None,
+           "problem": bool(r.get("has_problem")),
            "checked": checked, "card_added": False}
     m = r.get("mistake") or {}
     if m.get("found") and "Back:" in str(m.get("front", "")):     # both sides landed in one field: take the last pair
@@ -818,9 +1114,15 @@ def api_practice_generate(b):
     tid, n = b["topic"], max(1, min(int(b.get("count", 3)), 8))
     prompt = (f"Write {n} new practice questions on {topic_label(tid)} at {b.get('difficulty', 'exam')} difficulty. "
               "Copy the style, wording and mark allocation of the exam questions and past-paper questions in the "
-              "materials (but do not copy them word for word). Mix short and multi-step questions. For each, give a "
-              "detailed mark scheme listing what earns each mark (M1, A1, B1 style for maths), and the name of the "
-              "material it is modelled on as 'source'." + FIGURE_RULES)
+              "materials (but do not copy them word for word). " + (
+                  "Mix short and multi-step questions. For each, give a "
+                  "detailed mark scheme listing what earns each mark (M1, A1, B1 style for maths), and the name of the "
+                  "material it is modelled on as 'source'." if kind_of(tid) in ("maths", "science") else
+                  "Mix question types: short 'define/explain' questions, a data-response or case-study question (put the "
+                  "data, case or source extract in the question itself) and an extended 'analyse/evaluate/to what "
+                  "extent' question. For each, give a mark scheme listing the points that earn marks and, for longer "
+                  "answers, what each mark band needs (knowledge, application, analysis, evaluation), and the name of "
+                  "the material it is modelled on as 'source'.") + figure_rules(tid))
     out = gemini([{"role": "user", "parts": [{"text": prompt}]}], system_for(tid), QUESTION_SCHEMA, 0.9)
     with_figures(out.get("questions", []))
     with LOCK:
@@ -830,7 +1132,10 @@ def api_practice_generate(b):
 
 def api_practice_mark(b):
     tid = b["topic"]
-    prompt = (f"Mark this answer strictly but fairly, like an exam marker using the mark scheme.\n\n"
+    prompt = (f"Mark this answer strictly but fairly, like an exam marker using the mark scheme"
+              + (" (for written answers: credit knowledge, application, analysis and evaluation; ignore small "
+                 "grammar slips unless they change the meaning)" if kind_of(tid) not in ("maths", "science") else "")
+              + ".\n\n"
               f"QUESTION ({b['marks']} marks):\n{b['question']}\n\nMARK SCHEME:\n{b['mark_scheme']}\n\n"
               f"STUDENT ANSWER:\n{b.get('answer') or '(see attached photo of working)'}\n\n"
               "Give score (can be partial), max_marks, feedback (what was right, what lost marks and why, one tip), "
@@ -864,7 +1169,8 @@ def api_cards_generate(b):
 
 
 def api_cards_due(b):
-    cards = [c for c in load("cards.json", []) if c["due"] <= today() and (not b.get("topic") or c["topic"] == b["topic"])]
+    cards = [c for c in load("cards.json", []) if c["due"] <= today() and c["topic"] in TOPICS
+             and (not b.get("topic") or c["topic"] == b["topic"])]
     for c in cards:
         c["topic_name"] = topic_label(c["topic"])
         c["subject"] = TOPICS[c["topic"]]["subject"]
@@ -925,12 +1231,18 @@ def api_topic_files(b):
 
 
 def api_topic_search(b):
-    """Find a file of this topic by its name or by words in its text (all words must be there)."""
+    """Find a file by its name or by words in its text (all words must be there).
+    Searches one topic ("topic"), one subject ("subject") or every file (neither)."""
     words = [w for w in re.findall(r"\w+", str(b.get("q", "")).lower()) if len(w) > 1][:6]
     out = []
     if not words:
         return {"results": out}
-    for f in topic_files(b["topic"], shared=False):
+    smap = sorted_map()
+    if b.get("topic"):
+        pool = topic_files(b["topic"], shared=False)
+    else:
+        pool = [f for f in ALL_FILES if not b.get("subject") or f.split("/")[0] == b["subject"]]
+    for f in pool:
         name = f.rsplit("/", 1)[-1].removesuffix(".txt")
         in_name = all(w in name.lower() for w in words)
         text = (TEXT / f).read_text(errors="ignore")
@@ -941,8 +1253,10 @@ def api_topic_search(b):
         snippet = re.sub(r"\s+", " ", text[max(0, i - 70):i + 130]).strip() if i >= 0 else ""
         out.append({"path": f, "name": name, "in_name": in_name, "hits": sum(low.count(w) for w in words),
                     "snippet": snippet, "folder": " / ".join(re.sub(r"^\d+\s+", "", x) for x in f.split("/")[1:-1]),
-                    "original": bool(original_for(f))})
-    out.sort(key=lambda r: (not r["in_name"], -r["hits"]))
+                    "original": bool(original_for(f)), "subject": f.split("/")[0],
+                    "topic": topic_of(f, smap)[0]})
+    whole = lambda r: all(re.search(rf"\b{re.escape(w)}\b", r["name"].lower()) for w in words)   # "mole" before "molecules"
+    out.sort(key=lambda r: (not r["in_name"], not whole(r), -r["hits"]))
     return {"results": out[:40], "words": words}
 
 
@@ -992,17 +1306,15 @@ DIFFICULTY = {
 
 
 def learn_load(tid):
-    try:
-        return json.loads((LEARN_DIR / f"{tid}.json").read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"outline": None, "subs": {}}
+    if cloud.on():
+        return cloud.get(f"learn/{tid}.json", None) or {"outline": None, "subs": {}}
+    return read_json(LEARN_DIR / f"{tid}.json", None) or {"outline": None, "subs": {}}
 
 
 def learn_save(tid, obj):
-    p = LEARN_DIR / f"{tid}.json"
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1))
-    tmp.replace(p)
+    if cloud.on():
+        return cloud.put(f"learn/{tid}.json", obj)
+    write_atomic(LEARN_DIR / f"{tid}.json", json.dumps(obj, ensure_ascii=False, indent=1))
 
 
 def learn_summary(tid):
@@ -1056,7 +1368,7 @@ def learn_system(tid, sub=None, extra=""):
         "NCUK foundation-year syllabus.\n")
     focus = (f"\nCurrent subtopic: {sub['title']}. Summary: {sub.get('summary', '')}. "
              f"Objectives: {'; '.join(sub.get('objectives', []))}.") if sub else ""
-    return (f"{STYLE}\nTopic: {topic_label(tid)}.{focus}\n{extra}\n{no_lessons}"
+    return (f"{STYLE}{kind_rules(tid)}\nTopic: {topic_label(tid)}.{focus}\n{extra}\n{no_lessons}"
             + (f"\nThe student's course materials (base everything on them and follow their notation and methods):\n{material}" if material else ""))
 
 
@@ -1145,7 +1457,7 @@ def make_lesson(tid, sub):
               "example where useful; and one multiple-choice 'check' question (4 options, answer_index 0-3, explanation "
               "of why the answer is right and why the most tempting wrong option is wrong) that tests that step. "
               "Also a 2-3 sentence 'intro' (why this matters, what they'll be able to do) and a short 'summary'."
-              + FIGURE_RULES)
+              + figure_rules(tid))
     out = gemini([{"role": "user", "parts": [{"text": prompt}]}], learn_system(tid, sub), LESSON_SCHEMA, 0.5)
     steps = []
     for s in out.get("steps", []):
@@ -1156,9 +1468,14 @@ def make_lesson(tid, sub):
 
 
 def make_notes(tid, sub):
+    sections = ("## Key ideas\n## Definitions\n## Formulas and rules (with units)\n## Method, step by step\n"
+                "## Worked example\n## Common mistakes\n## Exam tips\n") if kind_of(tid) in ("maths", "science") else (
+                "## Key ideas\n## Key terms\n## Theories, models and who they come from\n## Examples and case studies\n"
+                "## Arguments for and against (evaluation)\n## How to answer the exam questions\n## Common mistakes\n"
+                if kind_of(tid) == "essay" else
+                "## Key ideas\n## Useful language and structures\n## Examples\n## Common mistakes\n## Exam tips\n")
     prompt = ("Write revision notes for this subtopic in Markdown, ready to revise from before the exam:\n"
-              "## Key ideas\n## Definitions\n## Formulas and rules (with units)\n## Method, step by step\n"
-              "## Worked example\n## Common mistakes\n## Exam tips\nSkip a section only if it truly doesn't apply. "
+              + sections + "Skip a section only if it truly doesn't apply. "
               "Be concise and precise; use tables where they help.")
     return gemini([{"role": "user", "parts": [{"text": prompt}]}], learn_system(tid, sub), temperature=0.4)
 
@@ -1202,13 +1519,20 @@ def api_learn_ask(b):
     return out
 
 
+TEST_STYLE = {
+    "maths": "Calculations should need working, not guessing.",
+    "science": "Calculations should need working, not guessing.",
+    "essay": ("Test understanding and application, not just recall: give a short case, data or source extract in the "
+              "question and ask which concept, explanation, strength, limitation or conclusion fits it best."),
+    "english": "Use real sentences and short passages; test the skill (choose, correct, paraphrase, structure).",
+}
 SOLVE_SCHEMA = {"type": "object", "properties": {"answers": {"type": "array", "items": {"type": "object", "properties": {
     "n": {"type": "integer"}, "index": {"type": "integer"}}, "required": ["n", "index"]}}}, "required": ["answers"]}
 
 
 def verify_mcqs(tid, qs):
     """A second pass solves every question without seeing the key; questions whose key it disagrees with are dropped."""
-    if TOPICS[tid]["subject"] == "EAP" or len(qs) < 3:
+    if kind_of(tid) == "english" or len(qs) < 3:
         return qs
     listing = "\n\n".join(f"Q{i}. {q['question']}\n" + "\n".join(f"  ({j}) {o}" for j, o in enumerate(q["options"]))
                           + (f"\n  [figure: {json.dumps(q['figure'], ensure_ascii=False)[:1500]}]" if q.get("figure") else "")
@@ -1234,8 +1558,8 @@ def api_learn_test(b):
     prompt = (f"Write a {n + 2}-question multiple-choice test on this subtopic. Difficulty: {DIFFICULTY.get(level, DIFFICULTY['medium'])}. "
               "Cover every learning objective. 4 options each with exactly one correct answer (answer_index 0-3), "
               "plausible distractors based on common mistakes, and an explanation of the correct answer. Vary where the "
-              "correct option sits. Put the objective being tested in 'skill'. Calculations should need working, not guessing."
-              + FIGURE_RULES)
+              "correct option sits. Put the objective being tested in 'skill'. " + TEST_STYLE.get(kind_of(tid), TEST_STYLE["science"])
+              + figure_rules(tid))
     out = gemini([{"role": "user", "parts": [{"text": prompt}]}], learn_system(tid, sub), TEST_SCHEMA, 0.8)
     qs = verify_mcqs(tid, clean_mcqs(out.get("questions", [])))[:n]
     if not qs:
@@ -1322,7 +1646,7 @@ def learn_stats():
 
 
 # ---------- study in Gemini: a pack (prompt + course files) for a session in the Gemini app ----------
-PACKS = APP.parent / "Study packs"
+PACKS = paths.PACKS
 PACK_MAX_PDFS = 7          # Gemini takes up to 10 files per message: PDFs + 1 notes file + room to spare
 PACK_TEXT_LIMIT = 250_000
 
@@ -1403,6 +1727,7 @@ SHORT_SUBJECT = {"Technical Maths": "Maths"}
 
 def handoff_prompt(tid, sub, L, files):
     t = TOPICS[tid]
+    numeric = kind_of(tid) in ("maths", "science")
     p = progress()
     tp = p["topics"].get(tid, {})
     hist = tp.get("history", [])
@@ -1462,9 +1787,11 @@ def handoff_prompt(tid, sub, L, files):
         "1. Start with 2 quick diagnostic questions to find what I already know. Wait for my answers.",
         "2. Teach each objective in order: a short explanation, a worked example from my files' style, then one question "
         "for me to try. Wait for my answer, check it, and explain my mistakes before moving on.",
-        "3. Use diagrams or tables when they help (triangles, graphs, forces...).",
+        "3. Use diagrams or tables when they help (triangles, graphs, forces...)." if numeric else
+        "3. Use real examples, short cases and tables (theories, for and against) when they help.",
         "4. When I'm ready, give me one full exam-style question with marks, then mark my answer like an examiner "
-        "(M1/A1/B1 style for maths) and show the model answer.",
+        + ("(M1/A1/B1 style for maths) and show the model answer." if numeric else
+           "(knowledge, application, analysis, evaluation) and show a model answer."),
         "5. Finish with a 5-question mini test. At the end tell me my score as “Score: X/5”, list what I still need to "
         "revise, and give me 3 flashcards (question → answer) for my weak points.",
         "6. Last, write a block titled “Notes for Study Desk”: 8 to 12 short plain-text bullets with what I learned in "
@@ -1516,7 +1843,7 @@ def api_handoff_result(b):
 
 # ---------- course file sync (sync.py, run in .venv with Playwright) ----------
 SYNC = {"proc": None}
-VENV_PY = APP / ".venv" / "bin" / "python"
+VENV_PY = Path(os.environ.get("STUDY_PYTHON") or APP / ".venv" / "bin" / "python")   # Playwright lives here
 SYNC_EVERY_H = 2
 
 
@@ -1530,24 +1857,30 @@ def sync_running():
     return p is not None and p.poll() is None
 
 
+SYNC_START = threading.Lock()
+
+
 def start_sync(mode="sync"):
-    import subprocess
-    if sync_running():
-        return False
     if not VENV_PY.exists():
         raise ValueError("Sync isn't installed: run  python3 -m venv .venv && .venv/bin/pip install playwright pypdf python-pptx python-docx  in study-app")
-    args = [str(VENV_PY), str(APP / "sync.py")] + (["login"] if mode == "login" else [])
-    log = open(DATA / "sync.log", "a")
-    SYNC["proc"] = subprocess.Popen(args, cwd=str(APP), stdout=log, stderr=log)
+    args = [str(VENV_PY), str(APP / "sync.py")] + ([mode] if mode in ("login", "courses") else [])
+    with SYNC_START:                              # the auto loop and the button can fire together
+        if sync_running():
+            return False
+        log = open(DATA / "sync.log", "a")
+        proc = SYNC["proc"] = subprocess.Popen(args, cwd=str(APP), stdout=log, stderr=log)
 
     def wait():
-        SYNC["proc"].wait()
+        proc.wait()
         log.close()
         reload_files()
         try:
             auto_sort()
         except Exception as e:
             print("sort:", e)
+        st = load("sync_status.json", {})
+        if mode == "sync" or st.get("added") or st.get("updated"):
+            _quiet(notify_files, st.get("added"), st.get("updated"))
     threading.Thread(target=wait, daemon=True).start()
     return True
 
@@ -1587,7 +1920,9 @@ def auto_sync_loop():
             st = load("sync_status.json", {})
             last = st.get("last_ok") or st.get("finished") or ""
             due = not last or datetime.fromisoformat(last) < datetime.now() - timedelta(hours=SYNC_EVERY_H)
-            if VENV_PY.exists() and due and st.get("state") not in ("login", "login_window") and not sync_running():
+            chosen = CONFIG.get("intostudy_courses") or load("courses.json", {})   # a new install: after the guide
+            if VENV_PY.exists() and chosen and due and st.get("state") not in ("login", "login_window", "choose") \
+                    and not sync_running():
                 start_sync()
         except Exception as e:
             print("auto sync:", e)
@@ -1604,7 +1939,7 @@ SORT_LOCK = threading.Lock()
 
 def auto_sort(paths=None):
     """Ask Gemini where each unsorted file belongs. Returns how many files it sorted."""
-    if not api_key() or not SORT_LOCK.acquire(blocking=False):
+    if not (api_key() or agy_on()) or not SORT_LOCK.acquire(blocking=False):
         return 0
     try:
         smap = sorted_map()
@@ -1806,10 +2141,454 @@ def api_compass(b):
         c = load("compass.json", {})
         c[r["subject"]] = entry
         save("compass.json", c)
-    todo = [str(x).strip() for x in r.get("todo") or [] if str(x).strip()][:8]
+    todo = [] if b.get("no_tasks") else [str(x).strip() for x in r.get("todo") or [] if str(x).strip()][:8]
     added = add_tasks("\n".join(todo), "compass", r["subject"]) if todo else []
     return {"subject": r["subject"], **entry, "tasks_added": [t["text"] for t in added]}
 
+
+# ---------- notifications (the bell): new files from teachers, Compass posts, homework, timetable changes ----------
+def notify(items):
+    """Add notifications: {id, kind, title, text, link, subject}; an id that is already there is skipped."""
+    items = [i for i in items if i and i.get("id")]
+    if not items:
+        return
+    with LOCK:
+        have = load("notifications.json", [])
+        ids = {n["id"] for n in have}
+        stamp = datetime.now().isoformat(timespec="seconds")
+        for i in items:
+            if i["id"] not in ids:
+                have.append({"ts": i.get("ts") or stamp, "text": "", "link": "", "subject": "", **i})
+                ids.add(i["id"])
+        save("notifications.json", sorted(have, key=lambda n: n["ts"])[-300:])
+
+
+def notify_seen():
+    return load("notify_seen.json", {}).get("seen", "")
+
+
+def unread_count():
+    seen = notify_seen()
+    return sum(n["ts"] > seen for n in load("notifications.json", []))
+
+
+def api_notify(_):
+    seen = notify_seen()
+    items = load("notifications.json", [])[::-1][:60]
+    return {"items": [{**n, "unread": n["ts"] > seen} for n in items], "unread": unread_count()}
+
+
+def api_notify_seen(_):
+    with LOCK:
+        save("notify_seen.json", {"seen": datetime.now().isoformat(timespec="seconds")})
+    return {"ok": True}
+
+
+def notify_files(added, updated):
+    """After a sync: one line per new file, or one per course when a teacher uploaded a lot at once."""
+    rows = [(x, "new") for x in added or []] + [(x, "updated") for x in updated or []]
+    by = defaultdict(list)
+    for x, kind in rows:
+        by[x.get("course", "")].append((x, kind))
+    out, stamp = [], datetime.now().strftime("%Y%m%d%H%M")
+    for course, xs in by.items():
+        subj = course if course in CONFIG["subjects"] else ""
+        if len(xs) > 8:
+            out.append({"id": f"files:{course}:{stamp}", "kind": "file", "subject": subj, "link": "#/files",
+                        "title": f"{SHORT_SUBJECT.get(course, course)}: {len(xs)} files on IntoStudy",
+                        "text": ", ".join(x["path"].rsplit("/", 1)[-1] for x, _ in xs[:3]) + " …"})
+            continue
+        for x, kind in xs:
+            tid = topic_for_path(x["path"])
+            name = x["path"].rsplit("/", 1)[-1]
+            out.append({"id": f"file:{x['path']}:{stamp}", "kind": "file", "subject": subj,
+                        "link": f"#/topic/{tid}/files" if tid else "#/files",
+                        "title": f"{SHORT_SUBJECT.get(course, course)}: {'new' if kind == 'new' else 'updated'} file",
+                        "text": name + (f" ({TOPICS[tid]['name']})" if tid else "")})
+    notify(out)
+
+
+# ---------- Compass, automatically: compass.py reads it in your own browser session, this turns it into
+# your timetable, the week's topics (from class news), tasks and assessments ----------
+COMPASS = {"proc": None}
+COMPASS_EVERY_H = 2
+COMPASS_MAP_SCHEMA = {"type": "object", "properties": {"pairs": {"type": "array", "items": {"type": "object", "properties": {
+    "activity": {"type": "string"}, "subject": {"type": "string"}}, "required": ["activity", "subject"]}}}, "required": ["pairs"]}
+
+
+def compass_running():
+    p = COMPASS["proc"]
+    return p is not None and p.poll() is None
+
+
+def compass_connected():
+    st = load("compass_status.json", {})
+    return bool(st.get("last_ok")) and st.get("signed_in") is not False
+
+
+def compass_public():
+    st = load("compass_status.json", {})
+    auto = load("compass_auto.json", {})
+    if not compass_running() and st.get("state") in ("running", "login_window"):
+        st["state"] = "idle"
+    return {**{k: st.get(k) for k in ("state", "step", "signed_in", "last_ok", "error", "via", "seen")},
+            "helper": str(HELPER), "asked": time.time() - COMPASS_WANT["at"] < 600,
+            "running": compass_running(), "connected": compass_connected(), "every_hours": COMPASS_EVERY_H,
+            "classes": len(auto.get("timetable", [])), "tasks": auto.get("tasks_added", 0),
+            "news": auto.get("news_read", 0), "applied": auto.get("applied"), "installed": VENV_PY.exists()}
+
+
+def start_compass(mode="fetch"):
+    if not VENV_PY.exists():
+        raise ValueError("Compass needs the browser part of Study Desk (it comes with the app).")
+    with SYNC_START:
+        if compass_running():
+            return False
+        log = open(DATA / "compass.log", "a")
+        COMPASS["proc"] = proc = subprocess.Popen([str(VENV_PY), str(APP / "compass.py")] + (["login"] if mode == "login" else []),
+                                                  cwd=str(APP), stdout=log, stderr=log, env=os.environ)
+
+    def wait():
+        proc.wait()
+        log.close()
+        if proc.returncode == 0 and load("compass_status.json", {}).get("state") == "idle":
+            _quiet(compass_apply)
+    threading.Thread(target=wait, daemon=True).start()
+    return True
+
+
+TIMETABLE_SCHEMA = {"type": "object", "properties": {"timetable": {"type": "array", "items": {"type": "object", "properties": {
+    "day": {"type": "integer"}, "start": {"type": "string"}, "end": {"type": "string"}, "subject": {"type": "string"},
+    "code": {"type": "string"}, "room": {"type": "string"}, "teacher": {"type": "string"}},
+    "required": ["day", "start", "end", "subject"]}}}, "required": ["timetable"]}
+
+
+def api_timetable_image(b):
+    """The fallback when Compass won't let Study Desk read it: the weekly timetable from a screenshot."""
+    image = b.get("image")
+    if not (image and image.get("data")):
+        raise ValueError("Add a screenshot of your weekly timetable.")
+    if not CONFIG["subjects"]:
+        raise ValueError("Build your programme first (step 5), then add the timetable.")
+    subjects = list(CONFIG["subjects"])
+    r = gemini([{"role": "user", "parts": user_parts(
+        "This is a student's weekly class timetable (a screenshot from Compass or similar). List every weekly class: "
+        f"day 1=Monday..5=Friday, start/end HH:MM (24 h), subject = the closest of {json.dumps(subjects, ensure_ascii=False)} "
+        "(skip anything that is none of them), plus course code, room and teacher if shown.", image)}],
+        None, TIMETABLE_SCHEMA, 0.0)
+    tt = [{k: str(c.get(k, "")) if k != "day" else int(c["day"]) for k in ("day", "start", "end", "subject", "code", "room", "teacher")}
+          for c in r.get("timetable", []) if c.get("subject") in subjects and 1 <= int(c.get("day") or 0) <= 7
+          and re.fullmatch(r"\d{1,2}:\d{2}", str(c.get("start", ""))) and re.fullmatch(r"\d{1,2}:\d{2}", str(c.get("end", "")))]
+    if not tt:
+        raise ValueError("Couldn't read any classes from that picture. Try a clearer screenshot of the whole week.")
+    with LOCK:
+        cfg = json.loads(TOPICS_FILE.read_text())
+        cfg["timetable"] = tt
+        write_atomic(TOPICS_FILE, json.dumps(cfg, ensure_ascii=False, indent=2))
+        load_config()
+    return {"classes": len(tt)}
+
+
+# The Chrome helper (compass-extension/): Compass's security check stops any browser that a program drives, so the
+# reading happens in the student's own Chrome, by a small extension they install once. It asks /api/compass/want
+# every minute and posts what Compass returned to /api/compass/push.
+HELPER = paths.HOME / "Chrome helper"
+COMPASS_WANT = {"at": 0}
+
+
+def ensure_helper():
+    """Keep a copy of the extension outside the app's code folder, so updates don't move it under Chrome's feet."""
+    src = APP / "compass-extension"
+    if not src.exists():
+        return None
+    if not HELPER.exists() or any(not (HELPER / f.name).exists() or (HELPER / f.name).read_bytes() != f.read_bytes()
+                                  for f in src.iterdir() if f.is_file()):
+        HELPER.mkdir(parents=True, exist_ok=True)
+        for f in src.iterdir():
+            if f.is_file():
+                shutil.copy2(f, HELPER / f.name)
+    return HELPER
+
+
+# What the helper reads, in order ({uid}, {monday}, {end}, {activityId} are filled in by it). Kept here so a fix
+# reaches students with an app update instead of a new extension.
+COMPASS_CALLS = [
+    {"key": "calendar", "service": "Calendar.svc/GetCalendarEventsByUser", "body": {
+        "userId": "{uid}", "homePage": True, "activityId": None, "locationId": None, "staffIds": None,
+        "startDate": "{monday}", "endDate": "{end}", "page": 1, "start": 0, "limit": 300}},
+    {"key": "news", "service": "NewsFeed.svc/GetMyNewsFeedPaged", "body": {"start": 0, "limit": 40}},
+    {"key": "tasks", "service": "LearningTasks.svc/GetAllLearningTasksByUserId", "body": {
+        "userId": "{uid}", "forceTaskId": 0, "page": 1, "start": 0, "limit": 200,
+        "sort": '[{"property":"dueDateTimestamp","direction":"DESC"}]'}},
+    # class news ("Class news: FSPH1102 (Physics)…"): each class has its own feed
+    {"key": "class_news", "each_activity": True, "max": 12, "service": "NewsFeed.svc/GetActivityNewsFeedPaged",
+     "body": {"activityId": "{activityId}", "start": 0, "limit": 20}},
+]
+
+
+def helper_version():
+    try:
+        return json.loads((APP / "compass-extension" / "manifest.json").read_text()).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def api_compass_want(_):
+    return {"want": time.time() - COMPASS_WANT["at"] < 600, "every_hours": COMPASS_EVERY_H, "calls": COMPASS_CALLS,
+            "helper_version": helper_version()}
+
+
+def api_compass_push(b):
+    """What the Chrome helper read from Compass (as the student, in their own browser)."""
+    COMPASS_WANT["at"] = 0
+    now_ = datetime.now().isoformat(timespec="seconds")
+    st = load("compass_status.json", {})
+    if b.get("diag"):
+        save("compass_diag.json", {"at": now_, **b["diag"]})   # what the helper saw, for fixing problems
+    if b.get("signin") or (not b.get("calendar") and not b.get("error")):
+        st.update(state="login", signed_in=False, via="extension", seen=now_, finished=now_,
+                  step="Sign in to Compass in Chrome (the Study Desk helper reads it from there).")
+        save("compass_status.json", st)
+        return {"ok": True}
+    if b.get("error") or not isinstance(b.get("calendar"), dict):
+        st.update(state="error", via="extension", seen=now_, error=str(b.get("error") or "nothing came back")[:300])
+        save("compass_status.json", st)
+        return {"ok": True}
+    raw = {k: b.get(k) for k in ["fetched", "site", "user_id"] + [c["key"] for c in COMPASS_CALLS]}
+    raw["fetched"] = now_
+    save("compass_raw.json", raw)
+    bad = [k for k in ("calendar", "news", "tasks") if (raw.get(k) or {}).get("status") != 200]
+    st.update(state="idle", signed_in=True, via="extension", seen=now_, finished=now_, last_ok=now_, error=None,
+              step="Read Compass in Chrome." + (f" Not available: {', '.join(bad)}." if bad else ""))
+    save("compass_status.json", st)
+    threading.Thread(target=lambda: _quiet(compass_apply), daemon=True).start()
+    return {"ok": True}
+
+
+def api_compass_helper(b):
+    """Setup help for the Chrome helper: show its folder, open Chrome's extensions page, or ask for a read now."""
+    act = b.get("action")
+    if act == "read":
+        COMPASS_WANT["at"] = time.time()
+        return {"ok": True}
+    folder = ensure_helper()
+    if not folder:
+        raise ValueError("The Chrome helper is missing from this copy of Study Desk.")
+    if act == "folder":
+        subprocess.run(["open", "-R", str(folder / "manifest.json")], timeout=20)
+        subprocess.run(["pbcopy"], input=str(folder), text=True, timeout=10)
+    elif act == "extensions":
+        subprocess.run(["open", "-a", "Google Chrome", "chrome://extensions"], timeout=20)
+    return {"folder": str(folder)}
+
+
+def api_compass_connect(b):
+    return {"started": start_compass("login" if b.get("mode") == "login" else "fetch")}
+
+
+def strip_html(s):
+    import html
+    s = re.sub(r"<(br|/p|/div|/li|/h\d)[^>]*>", "\n", str(s or ""), flags=re.I)
+    return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", html.unescape(re.sub(r"<[^>]+>", "", s)))).strip()
+
+
+def _ts(v):
+    """Compass dates: ISO strings (often UTC, with Z) or /Date(ms)/. Local datetime or None."""
+    if not v:
+        return None
+    m = re.search(r"/Date\((\d+)", str(v))
+    try:
+        if m:
+            return datetime.fromtimestamp(int(m.group(1)) / 1000)
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d.astimezone().replace(tzinfo=None) if d.tzinfo else d
+    except ValueError:
+        return None
+
+
+def _rows(block):
+    d = (block or {}).get("data")
+    if isinstance(d, dict):
+        d = d.get("data") or d.get("Data") or d.get("items") or []
+    return d if isinstance(d, list) else []
+
+
+def compass_subjects(activities):
+    """Which of your subjects each Compass class name means (asked once, remembered in data/compass_map.json)."""
+    known = load("compass_map.json", {})
+    subjects = list(CONFIG["subjects"])
+    todo = sorted({a for a in activities if a and a not in known})
+    if todo and subjects:
+        try:
+            r = gemini([{"role": "user", "parts": [{"text":
+                f"A student's school timetable names classes like this: {json.dumps(todo, ensure_ascii=False)}.\n"
+                f"Their subjects are: {json.dumps(subjects, ensure_ascii=False)}. For each class name give the subject it "
+                "is (codes like FSPH = Physics, FSCH = Chemistry, FEAP = EAP/English, FSBS/FBUS = Business, SOC = "
+                "Sociology, GS = Global Studies help), or \"\" if it is none of them (tutorial, assembly, wellbeing)."}]}],
+                None, COMPASS_MAP_SCHEMA, 0.0, think=False)
+            for x in r.get("pairs", []):
+                if x.get("activity") in todo:
+                    known[x["activity"]] = x["subject"] if x.get("subject") in subjects else ""
+        except GeminiError as e:
+            print("compass map:", e)
+        for a in todo:                       # anything still unknown: by name
+            known.setdefault(a, next((s for s in subjects if s.lower() in a.lower()), ""))
+        save("compass_map.json", known)
+    return known
+
+
+def _event_name(e):
+    return str(e.get("subjectLongName") or e.get("title") or e.get("longTitleWithoutTime") or "").strip()
+
+
+def compass_timetable(events):
+    """One typical teaching week of classes from the calendar (the first week that has classes)."""
+    rows = []
+    for e in events:
+        st, fi = _ts(e.get("start")), _ts(e.get("finish"))
+        if not st or not fi or e.get("allDay") or st.isoweekday() > 5:
+            continue
+        rows.append((st, fi, e))
+    if not rows:
+        return []
+    names = compass_subjects([_event_name(e) for _, _, e in rows])
+    first = min(st for st, _, _ in rows)
+    monday = (first - timedelta(days=first.weekday())).date()
+    out, seen = [], set()
+    for st, fi, e in sorted(rows, key=lambda x: x[0]):
+        if not monday <= st.date() < monday + timedelta(days=7):
+            continue
+        subj = names.get(_event_name(e), "")
+        if not subj:
+            continue
+        key = (st.isoweekday(), st.strftime("%H:%M"), subj)
+        if key in seen:
+            continue
+        seen.add(key)
+        parts = [x.strip() for x in str(e.get("longTitleWithoutTime") or "").split(" - ")]
+        room = ", ".join(l.get("locationName", "") for l in e.get("locations") or [] if l.get("locationName")) or \
+            (parts[2] if len(parts) > 2 else "")
+        teacher = ", ".join(str(m.get("managerImportIdentifier") or "") for m in e.get("managers") or []
+                            if m.get("managerImportIdentifier")) or (parts[3] if len(parts) > 3 else "")
+        out.append({"day": st.isoweekday(), "start": st.strftime("%H:%M"), "end": fi.strftime("%H:%M"), "subject": subj,
+                    "code": str(e.get("title") or (parts[1] if len(parts) > 1 else "")), "room": room, "teacher": teacher})
+    merged = []                         # Compass lists one entry per hour: back-to-back lessons become one block
+    for c in sorted(out, key=lambda c: (c["day"], c["start"])):
+        prev = merged[-1] if merged else None
+        if prev and prev["day"] == c["day"] and prev["subject"] == c["subject"] and prev["room"] == c["room"] and prev["end"] == c["start"]:
+            prev["end"] = c["end"]
+        else:
+            merged.append(dict(c))
+    return merged
+
+
+def compass_apply():
+    """Turn the last Compass read into the timetable, the week's topics, tasks and assessments."""
+    raw = load("compass_raw.json", {})
+    if not raw or not CONFIG["subjects"]:
+        return                                  # nothing read yet, or no programme yet (setup runs this again)
+    auto = load("compass_auto.json", {})
+    # 1. timetable
+    tt = compass_timetable(_rows(raw.get("calendar")))
+    if tt and auto.get("timetable") and tt != auto["timetable"]:
+        notify([{"id": f"timetable:{datetime.now():%Y%m%d%H%M}", "kind": "timetable", "link": "#/timetable",
+                 "title": "Your timetable changed in Compass", "text": "Open Timetable to see this week's classes."}])
+    if tt:
+        with LOCK:
+            cfg = json.loads(TOPICS_FILE.read_text())
+            cfg["timetable"] = tt
+            write_atomic(TOPICS_FILE, json.dumps(cfg, ensure_ascii=False, indent=2))
+            load_config()
+        auto["timetable"] = tt
+    # 2. learning tasks: open ones with a due date become tasks; tests and assessments also go on the list of dates
+    seen = set(auto.get("task_ids", []))
+    tasks = _rows(raw.get("tasks"))
+    names = compass_subjects([str(t.get("activityName") or t.get("subjectName") or "") for t in tasks])
+    new, ass = [], []
+    for t in tasks:
+        mine = next((x for x in t.get("students") or [] if isinstance(x, dict) and x.get("dueDateTimestamp")), {})
+        due = _ts(t.get("dueDateTimestamp") or t.get("dueDate") or mine.get("dueDateTimestamp"))
+        name = strip_html(t.get("name") or t.get("title"))[:200]
+        subj = names.get(str(t.get("activityName") or t.get("subjectName") or ""), "")
+        if not name or not due or due.date() < date.today() - timedelta(days=1):
+            continue
+        if re.search(r"\b(test|exam|assessment|quiz|essay|presentation|coursework|portfolio|mock)\b", name, re.I):
+            ass.append({"name": name, "date": due.date().isoformat(), "subject": subj})
+        tid = str(t.get("id") or t.get("taskId") or name)
+        if tid not in seen:
+            seen.add(tid)
+            new.append({"text": name, "subject": subj, "due": due.date().isoformat(), "due_kind": "date"})
+    if new:
+        with LOCK:
+            have = load("tasks.json", [])
+            for t in new:
+                have.append({**t, "id": uuid.uuid4().hex[:8], "created": today(), "done": None, "source": "compass"})
+            save("tasks.json", have)
+            log_event("task_add", count=len(new), source="compass")
+        notify([{"id": f"task:{t['text']}:{t['due']}", "kind": "task", "subject": t["subject"], "link": "#/today",
+                 "title": f"{SHORT_SUBJECT.get(t['subject'], t['subject']) + ': ' if t['subject'] else ''}new task in Compass",
+                 "text": f"{t['text']} (due {t['due']})"} for t in new])
+    auto["task_ids"] = sorted(seen)[-500:]
+    auto["tasks_added"] = auto.get("tasks_added", 0) + len(new)
+    auto["assessments"] = ass
+    # 3. class news from the last three weeks: which topics this week, homework, test dates (one AI read each)
+    read = set(auto.get("news_ids", []))
+    cutoff = datetime.now() - timedelta(days=21)
+    classes = {str(e.get("activityId")): _event_name(e) for e in _rows(raw.get("calendar")) if e.get("activityId")}
+    nid_of = lambda n: str(n.get("NewsItemId") or n.get("newsItemId") or n.get("Id") or "")
+    found = {nid_of(n): ("", n) for n in _rows(raw.get("news"))[:40]}
+    for aid, block in (raw.get("class_news") or {}).items():        # each class's own feed; a teacher's post often
+        for n in _rows(block)[:20]:                                   # shows on the home feed too: the class copy wins
+            found[nid_of(n)] = (classes.get(str(aid), ""), n)
+    posts = sorted(found.values(), key=lambda x: str(x[1].get("PostDateTime") or ""))   # oldest first: newest wins
+    done_now = 0
+    for cls, n in posts:
+        nid = str(n.get("NewsItemId") or n.get("newsItemId") or n.get("Id") or "")
+        when = _ts(n.get("PostDateTime") or n.get("postDateTime"))
+        if not nid or nid in read or (when and when < cutoff) or done_now >= 15:
+            continue
+        read.add(nid)
+        done_now += 1
+        body = strip_html(n.get("Content1")) + "\n" + strip_html(n.get("Content2"))
+        who, title = str(n.get("UserName") or "").strip(), strip_html(n.get("Title"))
+        subj = compass_subjects([cls]).get(cls, "") if cls else ""
+        notify([{"id": f"post:{nid}", "ts": when.isoformat(timespec="seconds") if when else None,
+                 "kind": "post" if cls else "news", "subject": subj, "link": "#/program" if cls else "#/today",
+                 "title": (f"{who} posted in {SHORT_SUBJECT.get(subj, subj or cls)}" if cls else f"{who or 'Compass'}: school news"),
+                 "text": (title or body.strip().split("\n")[0])[:160]}])
+        if not cls:
+            continue                            # school-wide news: only a notification, not a subject's plan
+        text = "\n".join(x for x in (f"Class news: {cls}", title, f"from {who}" if who else "",
+                                     f"posted {when:%A %d %B %Y}" if when else "", body) if x)
+        if len(text) < 40:
+            continue
+        try:                                    # homework only from posts of the last 8 days; older ones are history
+            r = api_compass({"text": text[:6000], "no_tasks": bool(when and when < datetime.now() - timedelta(days=8))})
+            auto["news_read"] = auto.get("news_read", 0) + 1
+            notify([{"id": f"task:{x}", "kind": "task", "subject": r["subject"], "link": "#/today",
+                     "title": f"{SHORT_SUBJECT.get(r['subject'], r['subject'])}: homework from {who or 'Compass'}", "text": x}
+                    for x in r.get("tasks_added", [])])
+        except (ValueError, GeminiError, KeyError):
+            pass
+    auto["news_ids"] = sorted(read)[-500:]
+    auto["applied"] = datetime.now().isoformat(timespec="seconds")
+    save("compass_auto.json", auto)
+
+
+def compass_loop():
+    """Read Compass again every couple of hours, like the IntoStudy sync (only once it has been connected)."""
+    time.sleep(60)
+    while True:
+        try:
+            st = load("compass_status.json", {})
+            last = st.get("last_ok") or ""
+            due = not last or datetime.fromisoformat(last) < datetime.now() - timedelta(hours=COMPASS_EVERY_H)
+            if last and due and st.get("via") != "extension" and st.get("state") not in ("login", "login_window", "blocked") \
+                    and not compass_running():
+                start_compass()
+        except Exception as e:
+            print("compass loop:", e)
+        time.sleep(1200)
 
 
 # ---------- standing: what you have studied, confirmed, and where you are behind ----------
@@ -1869,8 +2648,8 @@ def api_check_test(b):
               "after studying it elsewhere. Spread the questions over all the main ideas and skills of the topic in the "
               "course materials; exam-style, most need working or real understanding, not recall of a definition. "
               "4 options each with exactly one correct answer (answer_index 0-3), distractors from common mistakes, and "
-              "an explanation of the correct answer. Vary where the correct option sits. 'skill' = the idea being tested."
-              + FIGURE_RULES)
+              "an explanation of the correct answer. Vary where the correct option sits. 'skill' = the idea being tested. "
+              + TEST_STYLE.get(kind_of(tid), TEST_STYLE["science"]) + figure_rules(tid))
     out = gemini([{"role": "user", "parts": [{"text": prompt}]}], learn_system(tid), TEST_SCHEMA, 0.8)
     qs = verify_mcqs(tid, clean_mcqs(out.get("questions", [])))[:n]
     if len(qs) < 4:
@@ -1914,6 +2693,10 @@ def upcoming_assessments():
     for name, c in load("compass.json", {}).items():
         for a in c.get("assessments", []):
             out.append({"date": a["date"], "name": a["name"], "subject": name, "kind": "compass"})
+    known = {(a["date"], a["name"]) for a in out}
+    for a in load("compass_auto.json", {}).get("assessments", []):      # tests and deadlines from Compass tasks
+        if (a["date"], a["name"]) not in known:
+            out.append({"date": a["date"], "name": a["name"], "subject": a.get("subject", ""), "kind": "compass"})
     # a plan assessment is "in the week of": keep it until that week is over
     keep = lambda a: (date.fromisoformat(a["date"]) + timedelta(days=6 if a["kind"] == "plan" else 0)).isoformat() >= tdy
     return sorted((a for a in out if keep(a)), key=lambda a: a["date"])
@@ -1932,12 +2715,12 @@ def brief_text():
         if not sub:
             return ""
         for l in (sub.get("compass") or {}).get("lessons", []):
-            if l["date"] == d.isoformat():
+            if l["date"] == d.isoformat() and l["topic"] in TOPICS:
                 name = TOPICS[l["topic"]]["name"]
                 same = l.get("what", "").lower().replace(" and ", " & ") in name.lower()
                 return name if not l.get("what") or same else f"{name} ({l['what']})"
         w = next((w for w in sub["weeks"] if w["week"] == week_of(d)), None)
-        return ", ".join(TOPICS[i]["name"] for i in w["topics"]) if w else ""
+        return ", ".join(TOPICS[i]["name"] for i in w["topics"] if i in TOPICS) if w else ""
 
     def classes(d):
         if in_break(d):
@@ -1981,8 +2764,11 @@ def brief_text():
     if exams:
         L += ["", "ЭКЗАМЕНЫ"] + [f"• {e['name']}: через {e['days']} дн., подтверждено {e['ready']} из {e['in_scope']} тем"
                                  + (f", отстаёшь по {e['behind']}" if e.get("behind") else "") for e in exams]
-    if prog.get("week") and tdy.isoweekday() <= 5 and any(x["name"] == "Physics" and x["source"] != "compass" for x in prog.get("subjects", [])):
-        L += ["", "Физика: расписание этой недели из Compass ещё не добавлено. Пришли сюда текст поста, я сохраню."]
+    pasted = load("compass.json", {})
+    missing = [x["name"] for x in prog.get("subjects", []) if x["name"] in pasted and x["source"] != "compass"]
+    if prog.get("week") and tdy.isoweekday() <= 5 and missing and not compass_connected():
+        L += ["", f"{', '.join(short(m) for m in missing)}: расписание этой недели из Compass ещё не добавлено. "
+                  "Пришли сюда текст поста, я сохраню."]
     return "\n".join(L)
 
 
@@ -1999,6 +2785,8 @@ REVIEW_CHECK = {"type": "object", "properties": {"ok": {"type": "boolean"}, "pro
 
 
 def review_load(tid):
+    if cloud.on():
+        return cloud.get(f"review/{tid}.json", None) or {}
     try:
         return json.loads((REVIEWS / f"{tid}.json").read_text())
     except (OSError, ValueError):
@@ -2006,10 +2794,10 @@ def review_load(tid):
 
 
 def review_save(tid, obj):
+    if cloud.on():
+        return cloud.put(f"review/{tid}.json", obj)
     REVIEWS.mkdir(exist_ok=True)
-    tmp = REVIEWS / f"{tid}.tmp"
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1))
-    tmp.replace(REVIEWS / f"{tid}.json")
+    write_atomic(REVIEWS / f"{tid}.json", json.dumps(obj, ensure_ascii=False, indent=1))
 
 
 def review_sig(tid):
@@ -2018,19 +2806,23 @@ def review_sig(tid):
 
 def make_review(tid):
     """Write the review sheet (Markdown for the app, plain text for Telegram), checked once against the files."""
-    eap = TOPICS[tid]["subject"] == "EAP"
+    eap = kind_of(tid) in ("english", "essay")
+    essay = kind_of(tid) == "essay"
     prompt = (
         "Write REVIEW NOTES for the WHOLE topic, so the student can recall everything in one look before a class test or "
         "the exam and not re-read their chat history. Use ONLY the course materials: their notation, formulas, methods "
         "and exam-question style. Markdown, exactly these sections:\n"
         "## In one minute\n3 to 5 bullets: what this topic is about and what you must be able to do.\n"
         "## Key ideas and definitions\nEach term in **bold** with its meaning in one line, in the wording an examiner accepts.\n"
-        + ("## Useful language and structures\nThe phrases, sentence frames and structures taught, with one example each.\n"
+        + ("## Theories, models and evidence\nEach theory or model with who it comes from, the idea in one or two lines, "
+           "one example or case study, and one strength and one limitation.\n" if essay else
+           "## Useful language and structures\nThe phrases, sentence frames and structures taught, with one example each.\n"
            if eap else
            "## Formulas\nA table: Formula | Symbols and units | When to use it. Every formula must be in the materials or "
            "the formula sheet; say which ones are given in the exam and which must be memorised if the materials say.\n")
         + "## How to do the typical exam questions\nFor each question type in the materials: the steps as a numbered "
-        "list, then one short worked example with real numbers" + (" or a real sentence" if eap else " and units") + ".\n"
+        "list, then " + ("one short model paragraph that would score well" if essay else
+                         "one short worked example with real numbers" + (" or a real sentence" if eap else " and units")) + ".\n"
         "## Mistakes that lose marks\nBullets, each with the fix.\n"
         "## Check yourself\n5 short questions covering the topic, then 'Answers:' with the 5 answers.\n"
         "Rules: complete but compact (700 to 1100 words), no introduction or closing words, short lines, inline maths "
@@ -2088,7 +2880,7 @@ def build_review(tid):
 def review_state(tid):
     r = review_load(tid)
     return {"md": r.get("md"), "tg": r.get("tg"), "made": r.get("made"), "mine": r.get("mine", ""),
-            "stale": bool(r.get("md")) and r.get("files") != review_sig(tid), "generating": tid in REVIEW_BUSY}
+            "stale": bool(r.get("md")) and not HOSTED and r.get("files") != review_sig(tid), "generating": tid in REVIEW_BUSY}
 
 
 def api_review(b):
@@ -2421,7 +3213,807 @@ def new_files_text(new, title):
     return "\n".join([f"{title} ({len(new)})"] + [f"• {k}: {', '.join(v[:4])}{' …' if len(v) > 4 else ''}" for k, v in list(by.items())[:10]])
 
 
+# ---------- file viewer: open course files inside Study Desk, fill in worksheets ----------
+# Your filled-in copy of a Word file is saved as HTML in data/work/<hash>.json; the original is never changed.
+def _work_name(rel):
+    import hashlib
+    return f"work/{hashlib.sha1(rel.encode()).hexdigest()[:16]}.json"
+
+
+def _known(rel):
+    if rel not in ALL_FILES:
+        raise ValueError("unknown file")
+    return rel
+
+
+def api_file_view(b):
+    rel = _known(b["path"])
+    name = rel.removesuffix(".txt").rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    out = {"path": rel, "name": name, "ext": ext, "folder": rel.rsplit("/", 1)[0] if "/" in rel else "",
+           "original": bool(original_for(rel)), "topic": topic_for_path(rel.removesuffix(".txt")),
+           "work": load(_work_name(rel), None)}
+    if ext not in ("pdf", "docx", "png", "jpg", "jpeg", "gif", "webp"):
+        out["text"] = (TEXT / rel).read_text(errors="ignore")[:300_000]
+    return out
+
+
+def api_work_save(b):
+    rel = _known(b["path"])
+    html = b.get("html")
+    (DATA / "work").mkdir(exist_ok=True)
+    if not html:                                  # "Back to the original": forget your copy
+        with LOCK:
+            (DATA / _work_name(rel)).unlink(missing_ok=True)
+        return {"ok": True, "work": None}
+    if len(html) > 8_000_000:
+        raise ValueError("too large")
+    w = {"path": rel, "html": html, "updated": datetime.now().isoformat(timespec="seconds")}
+    with LOCK:
+        save(_work_name(rel), w)
+    return {"ok": True, "work": {"updated": w["updated"]}}
+
+
+def api_file_open(b):
+    f = original_for(_known(b["path"]))
+    if not f:
+        raise ValueError("no original file")
+    subprocess.run(["open", str(f)], timeout=20)      # Word / PowerPoint / Preview on this Mac
+    return {"ok": True}
+
+
+def work_docx(rel):
+    """Your filled-in copy as a Word file (macOS textutil turns the HTML into .docx)."""
+    w = load(_work_name(rel), None) if rel in ALL_FILES else None
+    if not w:
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = Path(d) / "in.html", Path(d) / "out.docx"
+        src.write_text(f"<html><head><meta charset='utf-8'></head><body>{w['html']}</body></html>")
+        subprocess.run(["textutil", "-convert", "docx", "-output", str(dst), str(src)], timeout=60, check=True)
+        return dst.read_bytes()
+
+
+# ---------- class recordings: record a lesson, Whisper (offline) writes the transcript, Gemini the notes ----------
+# data/classes/<id>.json + the audio next to it. Notes are split by Learn subtopic and shown in its My notes tab.
+CLASS_DIR = DATA / "classes"
+CLASS_DIR.mkdir(exist_ok=True)
+_VIBE = Path.home() / "Library/Application Support/github.com.thewh1teagle.vibe"   # the Vibe app already has the models
+WHISPER = shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
+FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+WHISPER_MODEL = next((Path(x) for x in (os.environ.get("WHISPER_MODEL") or read_env().get("WHISPER_MODEL"),
+                                         DATA / "models/ggml-large-v3-turbo.bin", _VIBE / "ggml-large-v3-turbo.bin")
+                      if x and Path(x).is_file()), None)
+VAD_MODEL = next((x for x in (DATA / "models/ggml-silero-v6.2.0.bin", _VIBE / "ggml-silero-v6.2.0.bin") if x.is_file()), None)
+AUDIO_EXT = {".webm", ".m4a", ".mp4", ".mp3", ".wav", ".aac", ".ogg", ".opus", ".flac", ".caf", ".aiff", ".aif", ".3gp", ".amr"}
+CLASS_QUEUE = threading.Semaphore(1)          # one transcription at a time; Whisper already uses the whole GPU
+CLASS_SCHEMA = {"type": "object", "properties": {
+    "title": {"type": "string"}, "summary": {"type": "string"},
+    "sections": {"type": "array", "items": {"type": "object", "properties": {
+        "sub": {"type": "string"}, "notes": {"type": "string"}}, "required": ["sub", "notes"]}},
+    "announcements": {"type": "array", "items": {"type": "object", "properties": {
+        "kind": {"type": "string", "enum": ["exam", "deadline", "homework", "other"]},
+        "text": {"type": "string"}, "date": {"type": "string"}}, "required": ["kind", "text", "date"]}}},
+    "required": ["title", "summary", "sections", "announcements"]}
+
+
+def class_load(cid):
+    if not re.fullmatch(r"[0-9a-f]{12}", str(cid)):
+        raise ValueError("unknown recording")
+    if HOSTED:
+        c = cloud.get(f"classes/{cid}.json", None)
+        if not c:
+            raise ValueError("unknown recording")
+        return c
+    return json.loads((CLASS_DIR / f"{cid}.json").read_text())
+
+
+def class_save(c):
+    write_atomic(CLASS_DIR / f"{c['id']}.json", json.dumps(c, ensure_ascii=False, indent=1))
+    if cloud.on() and c.get("status") not in ("recording", "uploading"):    # not on every audio piece
+        try:
+            cloud.put(f"classes/{c['id']}.json", c, force=True)
+        except Exception as e:
+            print(f"class {c['id']}: copy to Supabase failed ({e}); it goes up with the next change")
+
+
+def class_set(cid, **kw):
+    with LOCK:
+        c = class_load(cid)
+        c.update(kw)
+        class_save(c)
+        return c
+
+
+def class_new(topic, ext, status, day=None, source="mic"):
+    if topic not in TOPICS:
+        raise ValueError("Unknown topic")
+    c = {"id": uuid.uuid4().hex[:12], "topic": topic, "date": day if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)) else today(),
+         "created": datetime.now().isoformat(timespec="seconds"), "status": status, "step": "", "error": "",
+         "ext": ext, "source": source, "chunks": 0, "minutes": None, "title": "", "summary": "",
+         "sections": [], "announcements": [], "transcript": ""}
+    with LOCK:
+        class_save(c)
+    return c
+
+
+def class_transcribe(c):
+    if not WHISPER_MODEL or not Path(WHISPER).exists() or not Path(FFMPEG).exists():
+        raise RuntimeError("Speech recognition isn't set up: needs whisper-cli, ffmpeg (brew install whisper-cpp ffmpeg) "
+                           "and ggml-large-v3-turbo.bin in data/models.")
+    audio = CLASS_DIR / f"{c['id']}{c['ext']}"
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "a.wav"
+        r = subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-i", str(audio), "-ar", "16000", "-ac", "1",
+                            "-c:a", "pcm_s16le", str(wav)], capture_output=True, text=True, timeout=1800)
+        if r.returncode or not wav.exists():
+            raise RuntimeError("Couldn't read the audio: " + (r.stderr.strip()[-200:] or "unknown format"))
+        minutes = round(wav.stat().st_size / 32000 / 60, 1)
+        t = TOPICS[c["topic"]]
+        outline = learn_load(c["topic"]).get("outline") or []
+        hint = f"{t['subject']} class on {t['name']}: " + ", ".join(x["title"] for x in outline)[:400] + "."
+        cmd = [WHISPER, "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "en", "-oj", "-of", str(Path(tmp) / "out"),
+               "-t", "8", "-pp", "--prompt", hint]
+        if VAD_MODEL:
+            cmd += ["--vad", "-vm", str(VAD_MODEL)]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+        killer = threading.Timer(600 + minutes * 120, proc.kill)    # normally ~10x faster than real time
+        killer.start()
+        try:
+            for line in proc.stderr:
+                m = re.search(r"progress =\s*(\d+)%", line)
+                if m:
+                    class_set(c["id"], step=f"Transcribing {m.group(1)}%")
+            code = proc.wait()
+        finally:
+            killer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if code != 0 or not (Path(tmp) / "out.json").exists():
+            raise RuntimeError("Whisper couldn't transcribe this recording.")
+        segs = json.loads((Path(tmp) / "out.json").read_text(errors="replace")).get("transcription", [])
+    parts, last = [], -60_000
+    for sg in segs:                                       # paragraphs with a [mm:ss] mark about once a minute
+        text = sg.get("text", "").strip()
+        if not text:
+            continue
+        off = sg["offsets"]["from"]
+        if off - last >= 60_000:
+            parts.append(f"\n\n[{off // 60000:02d}:{off // 1000 % 60:02d}] ")
+            last = off
+        parts.append(text + " ")
+    transcript = "".join(parts).strip()
+    if len(transcript) < 20:
+        raise RuntimeError("No speech found in this recording.")
+    return transcript, minutes
+
+
+def class_notes(c):
+    tid = c["topic"]
+    t = TOPICS[tid]
+    outline = api_learn_outline({"topic": tid})["outline"]          # builds the subtopic plan if it doesn't exist yet
+    ids = {x["id"] for x in outline}
+    day = date.fromisoformat(c["date"])
+    prompt = (
+        f"Below is an automatic transcript of a {t['subject']} class the student recorded on {c['date']} "
+        f"({day.strftime('%A')}), topic: {t['name']}. Speech recognition gets technical words wrong: fix them using "
+        "the course materials and common sense. Never add content the teacher didn't cover.\n"
+        "1. 'sections': excellent notes of what was taught, as the best student in the room would write them: Markdown "
+        "with ### headings, definitions, " + ("formulas in LaTeX with units, every worked example the teacher did step by step "
+        "with their numbers" if kind_of(tid) in ("maths", "science") else "theories and who they come from, examples and "
+        "case studies, arguments for and against, how to structure answers") + ", and the tips and warnings they gave "
+        "(\"this always comes up\", typical mistakes). One entry "
+        "per subtopic actually covered, in class order; 'sub' is that subtopic's id from this list, or 'general' if it "
+        f"fits none: {json.dumps([{'id': x['id'], 'title': x['title']} for x in outline], ensure_ascii=False)}\n"
+        "2. 'announcements': everything said beyond the lesson content that the student must not miss: test and exam "
+        "dates, exam structure (sections, number and type of questions, duration, calculator, what's included), "
+        "deadlines, homework, changes to classes. One clear sentence each. 'date' is YYYY-MM-DD when a date is said or "
+        f"can be worked out from the class date, otherwise ''. Empty list if there are none.\n"
+        "3. 'title': 3-6 words naming what the class covered. 'summary': 1-2 sentences.\n"
+        "Skip the register, small talk, jokes and noise.\n\nTRANSCRIPT:\n" + c["transcript"][:200_000])
+    system = (f"{STYLE}\nTopic: {topic_label(tid)}.\nThe student's course materials for this topic (use them to fix "
+              f"misheard terms and follow their notation):\n{topic_material(tid, 150_000)}")
+    out = gemini([{"role": "user", "parts": [{"text": prompt}]}], system, CLASS_SCHEMA, 0.3)
+    sections, first = [], None
+    for x in out.get("sections", []):
+        sid = x.get("sub") if x.get("sub") in ids else None
+        first = first or sid
+        notes = tidy_math(str(x.get("notes", "")).strip())
+        if notes:
+            sections.append({"sub": sid, "notes": notes})
+    fallback = first or outline[0]["id"]                          # 'general' parts go with the first subtopic taught
+    merged = {}
+    for x in sections:
+        k = x["sub"] or fallback
+        merged[k] = (merged[k] + "\n\n" + x["notes"]) if k in merged else x["notes"]
+    news = [{"kind": a.get("kind") if a.get("kind") in ("exam", "deadline", "homework") else "other",
+             "text": str(a.get("text", "")).strip(), "date": a["date"] if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(a.get("date"))) else ""}
+            for a in out.get("announcements", []) if str(a.get("text", "")).strip()]
+    return {"title": str(out.get("title", "")).strip()[:80], "summary": str(out.get("summary", "")).strip(),
+            "sections": [{"sub": k, "notes": v} for k, v in merged.items()], "announcements": news}
+
+
+def class_process(cid):
+    with CLASS_QUEUE:
+        try:
+            c = class_load(cid)
+            if not c.get("transcript"):
+                class_set(cid, status="transcribing", step="Preparing the audio", error="")
+                transcript, minutes = class_transcribe(c)
+                c = class_set(cid, transcript=transcript, minutes=minutes)
+            class_set(cid, status="writing", step="Writing notes", error="")
+            notes = class_notes(c)
+            class_set(cid, status="done", step="", **notes)
+            with LOCK:
+                log_event("class_notes", c["topic"], minutes=c.get("minutes"))
+        except Exception as e:  # shown on the recording; Try again restarts from what's done
+            if not (CLASS_DIR / f"{cid}.json").exists():
+                return                            # deleted while it was being processed
+            class_set(cid, status="error", step="", error=str(e)[:300])
+
+
+def class_queue(cid):
+    threading.Thread(target=class_process, args=(cid,), daemon=True).start()
+
+
+def class_public(c, full=False):
+    return {k: v for k, v in c.items() if full or k != "transcript"}
+
+
+def api_class_start(b):
+    ext = b.get("ext") if b.get("ext") in AUDIO_EXT else ".webm"
+    return {"id": class_new(b["topic"], ext, "recording")["id"]}
+
+
+def api_class_stop(b):
+    with LOCK:
+        c = class_load(b["id"])
+        go = c["status"] == "recording" and c["chunks"] > 0
+        if go:
+            c.update(status="queued", step="Waiting")
+            class_save(c)
+    if c["status"] == "recording":                # nothing was recorded
+        return api_class_delete(b) | {"empty": True}
+    if go:
+        class_queue(c["id"])
+    return {"ok": True}
+
+
+def api_class_list(b):
+    out = []
+    if HOSTED:
+        found = [cloud.get(k, None) for k in cloud.keys("classes/")]
+    else:
+        found = []
+        for f in CLASS_DIR.glob("*.json"):
+            try:
+                found.append(json.loads(f.read_text()))
+            except json.JSONDecodeError:
+                continue
+    for c in found:
+        if c and (not b.get("topic") or c["topic"] == b["topic"]):
+            out.append(class_public(c))
+    out.sort(key=lambda c: (c["date"], c["created"]), reverse=True)
+    return {"classes": out, "ready": bool(WHISPER_MODEL)}
+
+
+def api_class_get(b):
+    return class_public(class_load(b["id"]), full=True)
+
+
+def api_class_redo(b):
+    with LOCK:
+        c = class_load(b["id"])
+        if c["status"] in ("queued", "transcribing", "writing", "recording", "uploading"):
+            return {"ok": True}
+        c.update(status="queued", step="Waiting", error="")
+        if b.get("topic") in TOPICS:
+            c["topic"] = b["topic"]
+        class_save(c)
+    class_queue(c["id"])
+    return {"ok": True}
+
+
+def api_class_delete(b):
+    c = class_load(b["id"])
+    with LOCK:
+        (CLASS_DIR / f"{c['id']}{c['ext']}").unlink(missing_ok=True)
+        (CLASS_DIR / f"{c['id']}.json").unlink(missing_ok=True)
+    if cloud.on():
+        cloud.delete(f"classes/{c['id']}.json")
+    return {"ok": True}
+
+
+def class_chunk(q, rfile, n):
+    """One piece of a recording in progress (sent every few seconds, in order)."""
+    if not 0 < n <= 50_000_000:
+        raise ValueError("bad piece size")
+    data, seq = rfile.read(n), int(q["n"])
+    if len(data) != n:
+        raise ValueError("the piece was cut off")
+    with LOCK:
+        c = class_load(q["id"])
+        if c["status"] != "recording":
+            raise ValueError("this recording was already stopped")
+        if seq < c["chunks"]:
+            return {"ok": True, "chunks": c["chunks"]}             # a retry of a piece we already have
+        if seq > c["chunks"]:                     # the browser gave up on a piece: keep going without it
+            print(f"class {c['id']}: pieces {c['chunks']}-{seq - 1} missing")
+            c["gaps"] = c.get("gaps", 0) + seq - c["chunks"]
+        with open(CLASS_DIR / f"{c['id']}{c['ext']}", "ab") as f:
+            f.write(data)
+        c["chunks"] = seq + 1
+        class_save(c)
+    return {"ok": True, "chunks": c["chunks"]}
+
+
+def class_upload(q, rfile, n):
+    """A whole recording made elsewhere (phone voice memo etc.)."""
+    ext = Path(q.get("name", "")).suffix.lower()
+    if ext not in AUDIO_EXT:
+        raise ValueError("That isn't an audio file Study Desk can read (m4a, mp3, wav, webm, ogg…)")
+    if not 0 < n <= 2_000_000_000:
+        raise ValueError("file too large")
+    c = class_new(q.get("topic", ""), ext, "uploading", q.get("date"), "file")
+    with open(CLASS_DIR / f"{c['id']}{ext}", "wb") as f:
+        left = n
+        while left:
+            piece = rfile.read(min(left, 1 << 20))
+            if not piece:
+                break
+            f.write(piece)
+            left -= len(piece)
+    if left:
+        api_class_delete({"id": c["id"]})
+        raise ValueError("the upload was cut off")
+    class_set(c["id"], status="queued", step="Waiting")
+    class_queue(c["id"])
+    return {"id": c["id"]}
+
+
+def class_resume():
+    """After a restart, finish recordings that were waiting or being processed."""
+    for f in CLASS_DIR.glob("*.json"):
+        try:
+            c = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            continue
+        if c.get("status") in ("queued", "transcribing", "writing"):
+            class_queue(c["id"])
+        elif c.get("status") == "uploading":
+            class_set(c["id"], status="error", step="", error="The upload was interrupted. Delete this and upload the file again.")
+
+
+# =====================================================================
+# FIRST-RUN SETUP GUIDE (/setup): name, AI engine, IntoStudy, Compass, programme
+# =====================================================================
+JOBS = {}            # background jobs the guide shows: {name: {"state": running|done|error, "step", "error"}}
+
+
+def run_job(name, fn, *a):
+    if JOBS.get(name, {}).get("state") == "running":
+        return False
+    JOBS[name] = {"state": "running", "step": "", "error": None, "started": datetime.now().isoformat(timespec="seconds")}
+
+    def go():
+        try:
+            fn(*a)
+            JOBS[name].update(state="done", step=JOBS[name].get("step") or "Done.")
+        except Exception as e:
+            JOBS[name].update(state="error", error=f"{e}"[:400])
+            print(f"setup job {name}:", type(e).__name__, e, flush=True)
+    threading.Thread(target=go, daemon=True).start()
+    return True
+
+
+def env_set(**kw):
+    """Write settings into .env (keys are never sent back to the browser)."""
+    with LOCK:
+        env = read_env()
+        env.update({k: str(v) for k, v in kw.items() if v is not None})
+        ENV.parent.mkdir(parents=True, exist_ok=True)
+        ENV.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+        os.chmod(ENV, 0o600)
+
+
+def setup_state():
+    return load("setup.json", {})
+
+
+def needs_setup():
+    return not setup_state().get("done") and not CONFIG["subjects"]
+
+
+# ---------- AI engine: the Antigravity CLI (agy) ----------
+AGY_MANIFEST = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/darwin_{arch}.json"
+AGY_SIGNIN = {"proc": None, "fd": None, "out": "", "url": None}
+
+
+def agy_env():
+    """AGY_HOME (testing only) gives agy its own sign-in and projects instead of ~/.gemini."""
+    env = dict(os.environ)
+    if os.environ.get("AGY_HOME"):
+        env["HOME"] = os.environ["AGY_HOME"]
+    return env
+
+
+def mac_arch():
+    """arm64 on Apple silicon (also when this Python runs under Rosetta), amd64 on Intel."""
+    try:
+        arm = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True).stdout.strip() == "1"
+    except OSError:
+        arm = False
+    return "arm64" if arm else "amd64"
+
+
+def agy_install():
+    """Download Google's own build of agy for this Mac (Intel or Apple silicon) into STUDY_HOME/bin."""
+    import hashlib
+    import tarfile
+    job = JOBS["agy_install"]
+    job["step"] = "Finding the right version for this Mac…"
+    with urllib.request.urlopen(AGY_MANIFEST.format(arch=mac_arch()), timeout=30) as r:
+        man = json.load(r)
+    url = man["url"]
+    if not url.startswith("https://storage.googleapis.com/antigravity-public/"):
+        raise RuntimeError("unexpected download address in Google's manifest")
+    dest = paths.HOME / "bin" / "agy"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        tgz = Path(tmp) / "agy.tar.gz"
+        curl_download(url, tgz, job, f"Downloading Antigravity {man.get('version', '')}")
+        h = hashlib.sha512()
+        with open(tgz, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        if man.get("sha512") and h.hexdigest() != man["sha512"]:
+            raise RuntimeError("the download was damaged (checksum mismatch); try again")
+        job["step"] = "Unpacking…"
+        with tarfile.open(tgz) as t:
+            member = next((m for m in t.getmembers() if m.isfile() and m.name.rsplit("/", 1)[-1] in ("antigravity", "agy")), None)
+            if not member:
+                raise RuntimeError("no agy program inside the download")
+            src = t.extractfile(member)
+            tmpbin = dest.with_suffix(".new")
+            with open(tmpbin, "wb") as f:
+                shutil.copyfileobj(src, f)
+        os.chmod(tmpbin, 0o755)
+        os.replace(tmpbin, dest)
+    global AGY
+    AGY = find_agy()
+    job["step"] = f"Installed Antigravity {man.get('version', '')}."
+
+
+def curl_download(url, dest, job, label):
+    """Big downloads go through macOS's curl (retries, follows redirects); progress shown in the job."""
+    size = 0
+    try:
+        head = subprocess.run(["curl", "-sIL", url], capture_output=True, text=True, timeout=30).stdout
+        size = int((re.findall(r"(?im)^content-length:\s*(\d+)", head) or [0])[-1])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    proc = subprocess.Popen(["curl", "-fsSL", "--retry", "3", "-o", str(dest), url], stderr=subprocess.PIPE, text=True)
+    while proc.poll() is None:
+        got = dest.stat().st_size if dest.exists() else 0
+        job["step"] = f"{label}: {got >> 20}" + (f" of {size >> 20} MB" if size else " MB")
+        time.sleep(1)
+    if proc.returncode:
+        raise RuntimeError(f"download failed ({(proc.stderr.read() or '').strip()[:200] or proc.returncode})")
+
+
+def agy_models():
+    """(signed_in, [model ids]) from `agy models`."""
+    if not os.path.exists(AGY):
+        return False, []
+    try:
+        r = subprocess.run([AGY, "models"], capture_output=True, text=True, timeout=90, env=agy_env(), stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, []
+    out = r.stdout + r.stderr
+    models = [l.split("\t", 1)[0].strip() for l in out.splitlines() if "\t" in l and not l.startswith(" ")]
+    return ("sign in" not in out.lower() and bool(models)), models
+
+
+def pick_agy_models(models):
+    gem = [m for m in models if m.startswith("gemini")] or models
+
+    def first(pats):
+        return next((m for p in pats for m in gem if re.search(p, m)), None)
+    smart = first([r"pro.*high", r"^gemini-[4-9].*high", r"high$", r"medium$", r"."])
+    fast = first([r"flash.*medium", r"flash.*low", r"flash", r"."]) or smart
+    return smart, fast
+
+
+def agy_project():
+    """Make sure the Antigravity project "Study Desk" exists, so these chats stay apart from the student's own."""
+    home = Path(agy_env().get("HOME") or Path.home())
+    d = home / ".gemini" / "config" / "projects"
+    for f in d.glob("*.json") if d.exists() else []:
+        try:
+            if json.loads(f.read_text()).get("name") == AGY_PROJECT:
+                return f.stem
+        except (OSError, ValueError):
+            continue
+    AGY_WORK.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
+    pid = str(uuid.uuid4())
+    (d / f"{pid}.json").write_text(json.dumps({"id": pid, "name": AGY_PROJECT, "projectResources": {
+        "resources": [{"folderUri": AGY_WORK.resolve().as_uri()}]}}, indent=2))
+    return pid
+
+
+def agy_signin_start():
+    """Run agy in a pseudo-terminal: it asks for a login method (we pick Google) and opens the browser."""
+    import pty
+    agy_signin_stop()
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([AGY], stdin=slave, stdout=slave, stderr=slave, env={**agy_env(), "TERM": "xterm-256color"},
+                            cwd=str(DATA), start_new_session=True, close_fds=True)
+    os.close(slave)
+    AGY_SIGNIN.update(proc=proc, fd=master, out="", url=None)
+
+    def read():
+        picked, raw = False, b""
+        while proc.poll() is None:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            raw = (raw + chunk)[-200_000:]
+            if not picked and b"Google OAuth" in raw:
+                time.sleep(0.4)
+                os.write(master, b"\r")          # 1. Google OAuth
+                picked = True
+            m = re.search(rb"\x1b\]8;[^;]*;(https://accounts\.google\.com/[^\x07\x1b]+)", raw)
+            if m:
+                AGY_SIGNIN["url"] = m.group(1).decode()
+            text = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", b"", raw)
+            text = re.sub(rb"\x1b\[[0-9;?>=]*[ -/]*[@-~]", b"", text).decode(errors="replace")
+            AGY_SIGNIN["out"] = "\n".join(l.rstrip() for l in text.splitlines() if l.strip())[-1500:]
+    threading.Thread(target=read, daemon=True).start()
+    threading.Timer(900, agy_signin_stop).start()    # give up after 15 minutes
+
+
+def agy_signin_stop():
+    p, fd = AGY_SIGNIN.get("proc"), AGY_SIGNIN.get("fd")
+    if p and p.poll() is None:
+        p.kill()
+    if fd:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    AGY_SIGNIN.update(proc=None, fd=None)
+
+
+def agy_check():
+    """Everything the guide needs about agy; sets up the project and models once signed in."""
+    signed, models = agy_models()
+    out = {"installed": os.path.exists(AGY), "path": AGY, "signed_in": signed, "models": models}
+    if signed:
+        agy_signin_stop()
+        smart, fast = pick_agy_models(models)
+        env = read_env()
+        if not env.get("AGY_MODEL") or env["AGY_MODEL"] not in models:
+            env_set(AGY_MODEL=smart)
+        if not env.get("AGY_FAST_MODEL") or env["AGY_FAST_MODEL"] not in models:
+            env_set(AGY_FAST_MODEL=fast)
+        out.update(project=agy_project(), model=agy_model(True), fast_model=agy_model(False))
+    return out
+
+
+def api_setup_agy(b):
+    act = b.get("action", "check")
+    if act == "install":
+        run_job("agy_install", agy_install)
+        return {"started": True}
+    if act == "signin":
+        if not os.path.exists(AGY):
+            raise ValueError("Install Antigravity first.")
+        agy_signin_start()
+        return {"started": True}
+    if act == "code":                     # the code Google shows after signing in, if agy asks for it
+        code = str(b.get("code", "")).strip()
+        if not AGY_SIGNIN.get("fd") or not re.fullmatch(r"[\w\-./~]{4,400}", code):
+            raise ValueError("Start the sign-in again, then paste the code.")
+        os.write(AGY_SIGNIN["fd"], code.encode() + b"\r")
+        return {"ok": True}
+    if act == "terminal":                 # fallback: the ordinary sign-in in a Terminal window
+        script = f'tell application "Terminal" to do script "{AGY}"\ntell application "Terminal" to activate'
+        subprocess.run(["osascript", "-e", script], timeout=20)
+        return {"ok": True}
+    if act == "test":
+        return {"answer": agy_call([{"role": "user", "parts": [{"text": "Reply with exactly: Study Desk is ready."}]}],
+                                   think=False)}
+    return agy_check()
+
+
+# ---------- the setup status and steps ----------
+def api_setup(_):
+    st, sync = setup_state(), load("sync_status.json", {})
+    found = load("courses_found.json", {})
+    chosen = load("courses.json", {}) or CONFIG.get("intostudy_courses", {})
+    signin = AGY_SIGNIN.get("proc")
+    return {
+        "done": bool(st.get("done")), "name": progress()["settings"].get("name", ""), "app": bool(os.environ.get("STUDY_HOME")),
+        "version": app_version(), "port": PORT, "home": str(paths.HOME),
+        "engine": {"installed": os.path.exists(AGY), "has_key": bool(api_key()),
+                   "install": JOBS.get("agy_install"), "signing_in": bool(signin and signin.poll() is None),
+                   "signin_url": AGY_SIGNIN.get("url"), "signin_out": AGY_SIGNIN.get("out", "")[-600:]},
+        "intostudy": {**{k: sync.get(k) for k in ("state", "step", "signed_in", "last_ok", "error", "finished")},
+                      "running": sync_running(), "found": found, "chosen": chosen, "files": len(ALL_FILES),
+                      "known": len(load("sync_manifest.json", {}))},
+        "compass": compass_public(), "timetable": len(CONFIG.get("timetable", [])),
+        "programme": {"job": JOBS.get("programme"), "subjects": {n: len(s["topics"]) for n, s in CONFIG["subjects"].items()},
+                      "log": tail(DATA / "setup_topics.log", 1500)},
+    }
+
+
+def tail(p, n):
+    try:
+        return p.read_text(errors="replace")[-n:]
+    except OSError:
+        return ""
+
+
+def app_version():
+    try:
+        return (APP / "VERSION").read_text().strip()
+    except OSError:
+        return "dev"
+
+
+def api_setup_name(b):
+    name = str(b.get("name", "")).strip()[:40]
+    if not name:
+        raise ValueError("Write your name first.")
+    return api_settings({"name": name})
+
+
+def api_setup_courses(b):
+    found = load("courses_found.json", {})
+    ids = [str(i) for i in b.get("ids", []) if str(i) in found]
+    if not ids:
+        raise ValueError("Tick at least one course.")
+    with LOCK:
+        save("courses.json", {i: found[i]["name"] for i in ids})
+    start_sync()
+    return {"ok": True, "chosen": len(ids)}
+
+
+def build_programme():
+    log = DATA / "setup_topics.log"
+    JOBS["programme"]["step"] = "Reading your course files and writing your programme (a few minutes)…"
+    with open(log, "w") as f:
+        r = subprocess.run([sys.executable, str(APP / "setup_topics.py"), "--force"], cwd=str(APP), stdout=f,
+                           stderr=subprocess.STDOUT, timeout=3600, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    if r.returncode:
+        raise RuntimeError(tail(log, 400).strip().splitlines()[-1] if tail(log, 400).strip() else f"exit {r.returncode}")
+    load_config()
+    reload_files()
+    with LOCK:                                   # exam dates from the files, unless you already set your own
+        p = progress()
+        if not p["exams"]:
+            p["exams"] = CONFIG.get("exams", [])
+            save("progress.json", p)
+    JOBS["programme"]["step"] = "Programme ready. Sorting the remaining files into topics…"
+    threading.Thread(target=lambda: _quiet(auto_sort), daemon=True).start()
+    if compass_connected():                      # now the timetable can be matched to the new subjects
+        threading.Thread(target=lambda: _quiet(compass_apply), daemon=True).start()
+
+
+def api_setup_programme(b):
+    if not ALL_FILES:
+        raise ValueError("No course files yet: connect IntoStudy and let the first sync finish.")
+    if not (agy_on() or api_key()):
+        raise ValueError("Connect the AI engine first (step 2).")
+    return {"started": run_job("programme", build_programme)}
+
+
+def api_setup_done(b):
+    with LOCK:
+        st = setup_state()
+        st["done"] = today()
+        save("setup.json", st)
+    return {"ok": True}
+
+
+# ---------- updates (Mac app only): replace the code, never the data ----------
+UPDATE_REPO = os.environ.get("STUDY_REPO", "akylbek10/study-desk-share")
+
+
+def _vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0"))
+
+
+def api_update(b):
+    if not os.environ.get("STUDY_HOME"):
+        raise ValueError("Updates are for the Study Desk app. This copy runs from a folder: use git pull.")
+    req = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "StudyDesk"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            rel = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Couldn't check for updates (GitHub said {e.code}).")
+    latest = rel.get("tag_name", "").lstrip("v")
+    asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".zip")), None)
+    newer = bool(asset) and _vtuple(latest) > _vtuple(app_version())
+    if b.get("check") or not newer:
+        return {"current": app_version(), "latest": latest or None, "newer": newer}
+    run_job("update", install_update, asset["browser_download_url"], latest)
+    return {"current": app_version(), "latest": latest, "newer": True, "started": True}
+
+
+def update_check_loop():
+    """Once a day: if a newer Study Desk is out, say so in the bell (the student decides when to install)."""
+    time.sleep(120)
+    while os.environ.get("STUDY_HOME"):
+        try:
+            r = api_update({"check": True})
+            if r.get("newer"):
+                notify([{"id": f"update:{r['latest']}", "kind": "update", "link": "#/settings",
+                         "title": f"Study Desk {r['latest']} is available", "text": "Settings → Check for updates. Your data stays as it is."}])
+        except Exception as e:
+            print("update check:", e)
+        time.sleep(86400)
+
+
+def install_update(url, latest):
+    job = JOBS["update"]
+    if not url.startswith(f"https://github.com/{UPDATE_REPO}/releases/download/"):
+        raise RuntimeError("unexpected download address")
+    with tempfile.TemporaryDirectory(dir=paths.HOME) as tmp:
+        z = Path(tmp) / "update.zip"
+        job["step"] = f"Downloading Study Desk {latest}…"
+        curl_download(url, z, job, f"Downloading Study Desk {latest}")
+        job["step"] = "Unpacking…"
+        subprocess.run(["ditto", "-x", "-k", str(z), tmp], check=True, timeout=300)
+        bundle = next(Path(tmp).glob("*.app"), None)
+        code = bundle / "Contents" / "Resources" / "study-app" if bundle else None
+        if not code or not (code / "server.py").exists():
+            raise RuntimeError("the download doesn't contain Study Desk")
+        old = APP.with_name(APP.name + ".old")
+        shutil.rmtree(old, ignore_errors=True)
+        os.replace(APP, old)                  # running code stays loaded in memory until the restart
+        shutil.copytree(code, APP)
+        target = Path(os.environ.get("STUDY_APP_BUNDLE", ""))   # also swap the app in Applications, when we can
+        if target.name.endswith(".app") and "AppTranslocation" not in str(target) and os.access(target.parent, os.W_OK):
+            spare = target.with_name(target.name + ".old")
+            shutil.rmtree(spare, ignore_errors=True)
+            try:
+                os.replace(target, spare)
+                shutil.copytree(bundle, target, symlinks=True)
+                shutil.rmtree(spare, ignore_errors=True)
+            except OSError as e:
+                print("update: couldn't replace the app bundle:", e)
+    job["step"] = f"Updated to {latest}. Restarting…"
+    label = os.environ.get("STUDY_LABEL")
+    if label:
+        threading.Timer(1.5, lambda: subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"])).start()
+
+
 ROUTES = {
+    ("GET", "/api/setup"): api_setup,
+    ("POST", "/api/setup/name"): api_setup_name,
+    ("POST", "/api/setup/agy"): api_setup_agy,
+    ("POST", "/api/setup/courses"): api_setup_courses,
+    ("POST", "/api/setup/programme"): api_setup_programme,
+    ("POST", "/api/setup/done"): api_setup_done,
+    ("POST", "/api/compass/connect"): api_compass_connect,
+    ("GET", "/api/notify"): api_notify,
+    ("POST", "/api/notify/seen"): api_notify_seen,
+    ("GET", "/api/compass/want"): api_compass_want,
+    ("POST", "/api/compass/push"): api_compass_push,
+    ("POST", "/api/compass/helper"): api_compass_helper,
+    ("POST", "/api/timetable/image"): api_timetable_image,
+    ("POST", "/api/update"): api_update,
+    ("POST", "/api/file/view"): api_file_view,
+    ("POST", "/api/work/save"): api_work_save,
+    ("POST", "/api/file/open"): api_file_open,
     ("POST", "/api/tasks"): api_tasks,
     ("POST", "/api/topic/search"): api_topic_search,
     ("POST", "/api/review"): api_review,
@@ -2466,11 +4058,119 @@ ROUTES = {
     ("POST", "/api/ping"): api_ping,
     ("POST", "/api/topic/files"): api_topic_files,
     ("POST", "/api/settings"): api_settings,
+    ("POST", "/api/class/start"): api_class_start,
+    ("POST", "/api/class/stop"): api_class_stop,
+    ("POST", "/api/class/list"): api_class_list,
+    ("POST", "/api/class/get"): api_class_get,
+    ("POST", "/api/class/redo"): api_class_redo,
+    ("POST", "/api/class/delete"): api_class_delete,
 }
 TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 
 
+# ---------- the phone version: one password, a signed cookie ----------
+# Things that need the Mac itself (its files, agy/whisper, the Compass browser, settings in .env).
+MAC_ROUTES = {api_file_view, api_work_save, api_file_open, api_agent, api_compass, api_handoff, api_handoff_result,
+              api_handoff_open, api_files_sort, api_files_assign, api_files_check, api_sync_start, api_settings,
+              api_class_start, api_class_stop, api_class_redo, api_class_delete, api_setup_name, api_setup_agy,
+              api_setup_courses, api_setup_programme, api_setup_done, api_compass_connect, api_update, api_timetable_image,
+              api_compass_push, api_compass_helper}
+PASSWORD = os.environ.get("STUDY_PASSWORD", "")
+SESSION_DAYS = 90
+LOGIN_PAGE = b"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Study Desk</title>
+<meta name="theme-color" content="#111214"><style>
+:root{color-scheme:dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111214;color:#ecedf0;
+font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:16px;box-sizing:border-box}
+form{width:min(360px,100%);display:grid;gap:14px}h1{font-size:26px;margin:0}p{margin:0;color:#a3a6ad;font-size:14.5px}
+input{font:inherit;padding:13px 14px;border-radius:12px;border:1px solid #33353b;background:#1b1c20;color:inherit}
+input:focus{outline:2px solid #6d8cff;outline-offset:1px}
+button{font:inherit;font-weight:600;padding:13px;border-radius:12px;border:0;background:#ecedf0;color:#111214;min-height:48px}
+#err{color:#ff8a80;min-height:1.5em}</style></head><body>
+<form id="f"><h1>Study Desk</h1><p>Sign in to see your cards, lessons and notes.</p>
+<input type="text" name="username" value="study-desk" autocomplete="username" hidden>
+<input id="pw" type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
+<button>Sign in</button><p id="err" role="alert"></p></form>
+<script>document.getElementById("f").onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;
+const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({password:document.getElementById("pw").value})}).catch(()=>null);
+if(r&&r.ok){location.replace("/");return}b.disabled=false;
+document.getElementById("err").textContent=r&&r.status===401?"Wrong password.":"Couldn't sign in. Try again.";}</script>
+</body></html>"""
+
+
+def _session_key():
+    import hashlib
+    return hashlib.sha256(f"studydesk|{PASSWORD}|{cloud.KEY}".encode()).digest()   # new password = everyone signed out
+
+
+def make_session():
+    import hmac
+    exp = str(int(time.time()) + SESSION_DAYS * 86400)
+    return f"{exp}.{hmac.new(_session_key(), exp.encode(), 'sha256').hexdigest()}"
+
+
+def session_ok(cookie_header):
+    import hmac
+    from http.cookies import SimpleCookie
+    try:
+        tok = SimpleCookie(cookie_header or "")["sd"].value
+        exp, sig = tok.split(".", 1)
+        good = hmac.new(_session_key(), exp.encode(), "sha256").hexdigest()
+        return hmac.compare_digest(sig, good) and int(exp) > time.time()
+    except (KeyError, ValueError):
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
+    timeout = 120                                 # a stalled upload can't hold a thread forever
+    OK_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+
+    def foreign(self):
+        origin = self.headers.get("Origin")
+        if HOSTED:                                # Vercel only routes its own domains here; refuse other sites' pages
+            return origin is not None and origin != f"https://{self.headers.get('Host', '')}"
+        if origin and origin.startswith("chrome-extension://") and self.path.split("?")[0] in ("/api/compass/want", "/api/compass/push"):
+            return self.headers.get("Host", "") not in self.OK_HOSTS
+        return (self.headers.get("Host", "") not in self.OK_HOSTS
+                or (origin is not None and origin.removeprefix("http://") not in self.OK_HOSTS))
+
+    def gate(self, method):
+        """Phone version only: True if this request has been answered (sign-in page, refusal)."""
+        if not HOSTED:
+            return False
+        path = self.path.split("?")[0]
+        if not cloud.on() or len(PASSWORD) < 12:
+            self.send(503, b"Study Desk isn't set up here yet: it needs SUPABASE_URL, SUPABASE_SERVICE_KEY "
+                           b"and STUDY_PASSWORD (12+ characters) in the Vercel project settings.", "text/plain")
+            return True
+        if path == "/login" and method == "GET":
+            self.send(200, LOGIN_PAGE, "text/html")
+            return True
+        if path == "/api/login" and method == "POST":
+            import hmac
+            try:
+                pw = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 10_000)) or b"{}").get("password", "")
+            except ValueError:
+                pw = ""
+            if not hmac.compare_digest(str(pw).encode(), PASSWORD.encode()):
+                time.sleep(1.5)                   # slows down guessing
+                self.send(401, {"error": "Wrong password."})
+                return True
+            self.send(200, {"ok": True}, extra={"Set-Cookie": f"sd={make_session()}; Path=/; Max-Age={SESSION_DAYS * 86400}; "
+                                                              "HttpOnly; Secure; SameSite=Lax"})
+            return True
+        if not session_ok(self.headers.get("Cookie")):
+            if path.startswith("/api/"):
+                self.send(401, {"error": "Sign in again."})
+            else:
+                self.send(302, b"", "text/plain", {"Location": "/login"})
+            return True
+        if path in ("/api/class/chunk", "/api/class/upload") or ROUTES.get((method, path)) in MAC_ROUTES:
+            self.send(503, {"error": MAC_ONLY.replace(" The phone version doesn't make anything new with AI.", "")})
+            return True
+        return False
+
     def log_message(self, fmt, *args):  # never prints request bodies
         print(time.strftime("%H:%M:%S"), self.command, self.path.split("?")[0])
 
@@ -2501,6 +4201,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, fn(body))
         except GeminiError as e:
             self.send(502, {"error": str(e)})
+        except cloud.Conflict as e:
+            self.send(409, {"error": str(e)})
         except (KeyError, ValueError, TypeError) as e:
             self.send(400, {"error": f"Bad request: {e}"})
         except Exception as e:  # keep the server alive
@@ -2518,17 +4220,49 @@ class Handler(BaseHTTPRequestHandler):
                   {"Content-Disposition": f"{disp}; filename*=UTF-8''{urllib.parse.quote(f.name)}"})
 
     def do_GET(self):
+        cloud.begin()
+        if self.foreign():
+            return self.send(403, b"Forbidden", "text/plain")
+        if self.gate("GET"):
+            return
         if self.path.startswith("/api/"):
             return self.handle_api("GET")
         if self.path.startswith("/file?"):
             return self.serve_original()
+        if self.path.startswith("/work.docx?"):
+            rel = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("p") or [""])[0]
+            data = work_docx(rel)
+            if not data:
+                return self.send(404, b"No filled-in copy yet", "text/plain")
+            name = rel.removesuffix(".txt").rsplit("/", 1)[-1].rsplit(".", 1)[0] + " (my answers).docx"
+            return self.send(200, data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             {"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}"})
         rel = self.path.split("?")[0].lstrip("/") or "index.html"
+        if rel == "setup":
+            rel = "setup.html"
+        elif rel == "index.html" and not HOSTED and needs_setup():
+            return self.send(302, b"", "text/plain", {"Location": "/setup"})
         f = (STATIC / rel).resolve()
-        if not str(f).startswith(str(STATIC)) or not f.is_file():
+        if not f.is_relative_to(STATIC.resolve()) or not f.is_file():
             f = STATIC / "index.html"
         self.send(200, f.read_bytes(), TYPES.get(f.suffix, "application/octet-stream"))
 
     def do_POST(self):
+        cloud.begin()
+        if self.foreign():
+            return self.send(403, {"error": "forbidden"})
+        if self.gate("POST"):
+            return
+        path = self.path.split("?")[0]
+        if path in ("/api/class/chunk", "/api/class/upload"):      # raw audio, not JSON
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                return self.send(200, (class_chunk if path.endswith("chunk") else class_upload)(q, self.rfile, n))
+            except (KeyError, ValueError, FileNotFoundError) as e:
+                return self.send(400, {"error": str(e)})
+            except Exception as e:
+                return self.send(500, {"error": f"{type(e).__name__}: {e}"})
         self.handle_api("POST")
 
 
@@ -2538,4 +4272,8 @@ if __name__ == "__main__":
     threading.Thread(target=auto_sync_loop, daemon=True).start()
     threading.Thread(target=lambda: (time.sleep(5), auto_sort()), daemon=True).start()
     threading.Thread(target=review_warmup, daemon=True).start()
+    threading.Thread(target=compass_loop, daemon=True).start()
+    threading.Thread(target=update_check_loop, daemon=True).start()
+    _quiet(ensure_helper)                         # an update brings a new helper: put it where Chrome loads it from
+    class_resume()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

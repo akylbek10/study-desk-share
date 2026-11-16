@@ -34,10 +34,13 @@
     <header class="topbar">
       <div class="topbar-title" id="topbar-title"></div>
       <div class="topbar-actions">
+      <button class="btn rec-btn" id="rec-btn" type="button"></button>
       <button class="btn sync-btn" id="sync-btn" type="button" hidden></button>
       <button class="btn assistant-btn" id="open-assistant" aria-controls="assistant" aria-expanded="false">
         <span class="i" data-i="sparkles"></span><span>Assistant</span><kbd>/</kbd>
       </button>
+      <div class="bell-wrap"><button class="btn bell-btn" id="bell-btn" type="button" aria-controls="bell-panel" aria-expanded="false" aria-label="Notifications" hidden></button>
+        <div class="bell-panel" id="bell-panel" hidden></div></div>
       </div>
     </header>
     <main id="view" tabindex="-1"></main>
@@ -78,8 +81,10 @@
 <script src="timetable.js"></script>
 <script src="sync.js"></script>
 <script src="files.js"></script>
-<script src="gemini.js"></script>
 <script src="program.js"></script>
 <script src="progress.js"></script>
+<script src="viewer.js"></script>
+<script src="record.js"></script>
+<script src="notify.js"></script>
 </body>
 </html>
