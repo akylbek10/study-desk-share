@@ -51,7 +51,8 @@ async function checkAgy() {
 function schedule() {
   clearTimeout(U.timer);
   const s = U.st, busy = s.engine.install?.state === "running" || s.engine.signing_in || s.intostudy.running
-    || ["login_window", "running"].includes(s.intostudy.state) || s.compass.running || s.programme.job?.state === "running";
+    || ["login_window", "running"].includes(s.intostudy.state) || s.compass.running || s.programme.job?.state === "running"
+    || (ORDER.find(k => !done[k]()) === "compass");          // waiting for the Chrome helper to show up
   U.timer = setTimeout(async () => {
     if (s.engine.signing_in || s.engine.install?.state === "running") await checkAgy();
     load();
@@ -128,17 +129,17 @@ const BODY = {
     if (c.connected) return stateBox(`Compass is connected${c.via === "extension" ? " through the Chrome helper" : ""}${c.classes ? `: ${c.classes} weekly classes in your timetable` : ""}${c.tasks ? `, ${c.tasks} tasks` : ""}${c.news ? `, ${c.news} class posts read` : ""}. It's read again every ${c.every_hours} hours while Chrome is open.`, "ok")
       + (c.classes || subs ? "" : `<p>Your timetable is matched to your subjects after step 5.</p>`)
       + `<div class="row"><button class="btn" type="button" data-act="helper-read" ${c.asked ? "disabled" : ""}>${c.asked ? "Asked the helper…" : "Read Compass now"}</button></div>`;
-    const seen = c.via === "extension" && c.state === "login";
-    return `<p>Compass checks that a real person's browser is visiting, so Study Desk reads it through a small helper in <b>your own Chrome</b>, where you're signed in. It reads your timetable, class news (what each class covers, homework) and learning tasks every ${c.every_hours} hours and gives them only to Study Desk on this Mac. Install it once (two minutes):</p>
+    const signin = c.via === "extension" && c.state === "login";
+    return `<p>Compass only lets real browsers in, so Study Desk reads it through a small helper in <b>your own Chrome</b>, where you're signed in to Compass. It reads your timetable, class news and homework every ${c.every_hours} hours and gives them only to Study Desk on this Mac. Add it once:</p>
       <ol style="margin:0;padding-left:20px;display:grid;gap:8px;color:var(--ink-2)">
-        <li><button class="btn sm" type="button" data-act="helper-folder">Show the helper folder</button> (its location is copied for you).</li>
-        <li><button class="btn sm" type="button" data-act="helper-ext">Open Chrome's extensions page</button> and turn on <b>Developer mode</b> (top right).</li>
-        <li>Click <b>Load unpacked</b>. In the window, press Shift-Cmd-G, then Cmd-V and Return, then <b>Select</b>.</li>
-        <li>Sign in to <a href="https://intomanchester-uk.compass.education" target="_blank" rel="noopener">Compass</a> in Chrome if you aren't already.</li>
+        <li><button class="btn sm primary" type="button" data-act="helper-install">Add the helper to Chrome</button> Chrome opens its extensions page and Finder shows a folder called <b>Chrome helper</b>.</li>
+        <li>In Chrome, turn on <b>Developer mode</b> (the switch at the top right).</li>
+        <li><b>Drag the “Chrome helper” folder</b> from Finder onto the Chrome page. That's all: this page notices by itself.</li>
       </ol>
-      ${seen ? stateBox("The helper is installed, but Compass isn't signed in in Chrome. Sign in there; the helper notices within a minute.", "bad")
-        : c.asked ? stateBox("Waiting for the helper to read Compass (up to a minute)…") : c.state === "error" && c.via === "extension" ? stateBox(c.error || "The helper couldn't read Compass.", "bad") : ""}
-      <div class="row"><button class="btn primary" type="button" data-act="helper-read" ${c.asked ? "disabled" : ""}>I've installed it: read Compass</button>
+      ${c.helper_seen && !signin ? stateBox("The helper is installed. Reading Compass…", "ok") : ""}
+      ${signin ? stateBox("The helper is installed, but you're not signed in to Compass in Chrome. Sign in there (intomanchester-uk.compass.education); the helper notices within a minute.", "bad")
+        : c.state === "error" && c.via === "extension" ? stateBox(c.error || "The helper couldn't read Compass.", "bad") : ""}
+      <div class="row"><button class="btn quiet" type="button" data-act="helper-read" ${c.asked ? "disabled" : ""}>${c.asked ? "Asked the helper…" : "Read Compass again"}</button>
       <button class="btn quiet" type="button" data-act="compass-skip">Skip for now</button></div>
       <details><summary>No Google Chrome, or the helper won't install?</summary><div style="display:grid;gap:10px;margin-top:10px">${fallback}</div></details>`;
   },
@@ -180,6 +181,7 @@ document.addEventListener("click", async e => {
     const ids = [...document.querySelectorAll(".courses input:checked")].map(x => x.value);
     return run(() => api("/api/setup/courses", { ids }), "Downloading your courses…");
   }
+  if (act === "helper-install") return run(() => api("/api/compass/helper", { action: "install" }), "Now: Developer mode on, then drag the folder onto the Chrome page");
   if (act === "helper-folder") return run(() => api("/api/compass/helper", { action: "folder" }), "Finder shows the folder; its location is copied");
   if (act === "helper-ext") return run(() => api("/api/compass/helper", { action: "extensions" }), "Chrome's extensions page opened");
   if (act === "helper-read") return run(() => api("/api/compass/helper", { action: "read" }), "Asked the helper to read Compass");

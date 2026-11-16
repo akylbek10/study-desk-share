@@ -2233,6 +2233,7 @@ def compass_public():
         st["state"] = "idle"
     return {**{k: st.get(k) for k in ("state", "step", "signed_in", "last_ok", "error", "via", "seen")},
             "helper": str(HELPER), "asked": time.time() - COMPASS_WANT["at"] < 600,
+            "helper_seen": time.time() - COMPASS_WANT["seen"] < 150,
             "running": compass_running(), "connected": compass_connected(), "every_hours": COMPASS_EVERY_H,
             "classes": len(auto.get("timetable", [])), "tasks": auto.get("tasks_added", 0),
             "news": auto.get("news_read", 0), "applied": auto.get("applied"), "installed": VENV_PY.exists()}
@@ -2293,7 +2294,7 @@ def api_timetable_image(b):
 # reading happens in the student's own Chrome, by a small extension they install once. It asks /api/compass/want
 # every minute and posts what Compass returned to /api/compass/push.
 HELPER = paths.HOME / "Chrome helper"
-COMPASS_WANT = {"at": 0}
+COMPASS_WANT = {"at": 0, "seen": 0}
 
 
 def ensure_helper():
@@ -2334,6 +2335,7 @@ def helper_version():
 
 
 def api_compass_want(_):
+    COMPASS_WANT["seen"] = time.time()            # only the helper asks this: so we know it's installed
     return {"want": time.time() - COMPASS_WANT["at"] < 600, "every_hours": COMPASS_EVERY_H, "calls": COMPASS_CALLS,
             "helper_version": helper_version()}
 
@@ -2374,11 +2376,12 @@ def api_compass_helper(b):
     folder = ensure_helper()
     if not folder:
         raise ValueError("The Chrome helper is missing from this copy of Study Desk.")
-    if act == "folder":
-        subprocess.run(["open", "-R", str(folder / "manifest.json")], timeout=20)
-        subprocess.run(["pbcopy"], input=str(folder), text=True, timeout=10)
-    elif act == "extensions":
+    if act in ("install", "extensions"):           # Chrome's extensions page first, then Finder on top of it
         subprocess.run(["open", "-a", "Google Chrome", "chrome://extensions"], timeout=20)
+    if act in ("install", "folder"):               # the "Chrome helper" folder, selected, ready to drag
+        time.sleep(1.5 if act == "install" else 0)
+        subprocess.run(["open", "-R", str(folder)], timeout=20)
+        subprocess.run(["pbcopy"], input=str(folder), text=True, timeout=10)
     return {"folder": str(folder)}
 
 

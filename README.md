@@ -11,7 +11,7 @@ A study tracker for INTO Manchester foundation-year students, on your own Mac. I
 
 3. **Follow the guide.** The first start takes a few minutes (Study Desk installs what it needs), then the setup guide opens in your browser: your name, the AI engine (free, with a Google account), IntoStudy, Compass, and your programme. You sign in to each service yourself; Study Desk never sees your passwords.
 
-You need: internet, a Google account, your university Microsoft account, and Google Chrome. Compass only lets real browsers in, so Study Desk reads it through a small helper extension in your own Chrome (the guide shows how to add it; one minute). Without Chrome you can add your timetable from a screenshot.
+You need: internet, a Google account, your university Microsoft account, and Google Chrome. Compass only lets real browsers in, so Study Desk reads it through a small helper extension in your own Chrome (turn on Developer mode in Chrome and drag one folder in; the guide opens both for you). Without Chrome you can add your timetable from a screenshot.
 
 **Updates:** Settings → Check for updates. Your data stays where it is.
 **Your data** lives only on your Mac, in `~/Library/Application Support/Study Desk`. AI requests go to Google (Antigravity or your Gemini key).
