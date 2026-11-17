@@ -15,11 +15,12 @@ async function renderWeek(n) {
       <h1>Week ${d.week}${d.week === d.current ? ` <span class="tag due">this week</span>` : ""}</h1>
       <p class="sub">${d.start ? `From ${fmtDay(d.start, { weekday: "long", day: "numeric", month: "long" })}. ` : ""}Everything for this week's lessons in one place: notes and guided learning made from your teachers' slides, worksheets, readings and videos.</p>
     </div>${nav}</div>
-    ${d.subjects.filter(s => s.topics.length || s.assessment).map(s => `
+    ${d.subjects.filter(s => s.topics.length || s.assessment || d.week >= d.current).map(s => `
       <section class="section">
         <div class="section-head"><h2>${subjPill(s.name)}</h2><p>${esc(s.focus || "")}</p></div>
         ${s.assessment ? `<div class="notice">${icon("info")}<div><b>${esc(s.assessment)}</b></div></div>` : ""}
         ${s.topics.map(t => weekTopicHTML(t)).join("")}
+        ${s.topics.length ? "" : `<div class="rows empty-note"><b>Nothing from your teacher for this week yet</b>Topics and files appear here by themselves as soon as they are added on IntoStudy or OneDrive.</div>`}
       </section>`).join("") || `<div class="rows empty-note"><b>Nothing planned for this week</b>It may be a break or outside the course plan.</div>`}`;
 }
 
@@ -35,6 +36,7 @@ function weekTopicHTML(t) {
       </div>`}</div>
     ${groups.length ? `<div class="wk-files">${groups.map(([k, label]) => `<div><h4>${label}</h4><ul>${t.files[k].map(f =>
       `<li><a href="${fileHref(f.path)}">${icon("file")}${esc(f.name)}</a>${f.onedrive ? ` <span class="tag">OneDrive</span>` : ""}</li>`).join("")}</ul></div>`).join("")}</div>` : ""}
+    ${!groups.length && !videos.length && !sources.length ? `<p class="small muted">No files for this topic from your teacher yet. They appear here by themselves; Guided learning already works from the syllabus.</p>` : ""}
     ${t.more > 0 && t.id ? `<p class="small muted"><a href="#/topic/${t.id}/files">All ${t.more + Object.values(t.files).flat().length} files for this topic</a></p>` : ""}
     ${videos.length ? `<h4>Videos</h4><div class="vid-grid">${videos.map(l => `<figure class="vid"><div class="vid-frame">${linkPlayer(l)}</div><figcaption><b>${esc(l.title)}</b></figcaption></figure>`).join("")}</div>` : ""}
     ${sources.length ? `<h4>Sources</h4><ul class="wk-src">${sources.map(l => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener">${icon("external")}${esc(l.title)}</a> <span class="muted small">${esc(linkHost(l.url))}</span></li>`).join("")}</ul>` : ""}

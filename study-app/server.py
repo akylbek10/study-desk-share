@@ -74,11 +74,12 @@ if not TOPICS_FILE.exists():          # first run: no subjects yet; the setup gu
 CONFIG, TOPICS = {}, {}
 
 
-def week_start(n):
+def week_start(n, cfg=None):
     """Monday of teaching week n (weeks that start inside a break are skipped)."""
-    d, k = date.fromisoformat(CONFIG["term"]["week1"]), 1
+    cfg = CONFIG if cfg is None else cfg
+    d, k = date.fromisoformat(cfg["term"]["week1"]), 1
     while True:
-        in_break = any(b["start"] <= d.isoformat() <= b["end"] for b in CONFIG.get("breaks", []))
+        in_break = any(b["start"] <= d.isoformat() <= b["end"] for b in cfg.get("breaks", []))
         if not in_break:
             if k == n:
                 return d
@@ -99,18 +100,21 @@ def week_of(day):
 def load_config():
     """(Re)read topics.json: at start and after the setup guide or Compass changes it."""
     cfg = json.loads(TOPICS_FILE.read_text())
-    CONFIG.clear()
-    CONFIG.update(cfg)
-    for sub in CONFIG["subjects"].values():          # a topic in the weekly plan starts in its first planned week
+    for sub in cfg["subjects"].values():             # a topic in the weekly plan starts in its first planned week
         for t in sub["topics"]:
             weeks = [w["week"] for w in sub.get("plan", []) if t["id"] in w["topics"]]
-            if weeks and "term" in CONFIG:
-                t["start"] = week_start(min(weeks)).isoformat()
-        prev = CONFIG.get("term", {}).get("week1", date.today().isoformat())
+            if weeks and "term" in cfg:
+                t["start"] = week_start(min(weeks), cfg).isoformat()
+        prev = cfg.get("term", {}).get("week1", date.today().isoformat())
         for t in sub["topics"]:                      # not in the plan and no date given: after the topic before it
             prev = t.setdefault("start", prev)
-    TOPICS.clear()
-    TOPICS.update({t["id"]: {**t, "subject": s} for s, sub in CONFIG["subjects"].items() for t in sub["topics"]})
+    topics = {t["id"]: {**t, "subject": s} for s, sub in cfg["subjects"].items() for t in sub["topics"]}
+    CONFIG.update(cfg)                               # swapped in place, never empty: other requests keep reading them
+    for k in [k for k in CONFIG if k not in cfg]:
+        del CONFIG[k]
+    TOPICS.update(topics)
+    for k in [k for k in TOPICS if k not in topics]:
+        del TOPICS[k]
 
 
 load_config()
@@ -1340,12 +1344,126 @@ def file_kind(f):
     return "other"
 
 
+# ---------- keeping the programme up to date: new weeks from the files teachers add ----------
+PLAN_LOCK = threading.Lock()
+PLAN_SCHEMA = {"type": "object", "properties": {"weeks": {"type": "array", "items": {"type": "object", "properties": {
+    "week": {"type": "integer"}, "topics": {"type": "array", "items": {"type": "string"}},
+    "new_topics": {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"}, "name": {"type": "string"}, "code": {"type": "string"}}, "required": ["id", "name"]}},
+    "focus": {"type": "string"}, "assessment": {"type": "string"}}, "required": ["week", "topics", "focus"]}}},
+    "required": ["weeks"]}
+
+
+def file_week(path):
+    """Teaching week a course file belongs to, from its folders or name ("Week 9", "Week 1.10", "W9L2"), or None."""
+    low = path.lower()
+    term = str(CONFIG.get("term", {}).get("name", "")).lower()
+    if "semester 2" in low and "2" not in term or "semester 1" in low and "2" in term:
+        return None
+    m = re.search(r"\bweek\s*0?\d\.(\d{1,2})\b", low) or re.search(r"\bweek\s*0?(\d{1,2})\b", low) or \
+        re.search(r"\bw(\d{1,2})\s*l\s*\d", low) or re.search(r"\bwk\s*0?(\d{1,2})\b", low)
+    n = int(m.group(1)) if m else None
+    return n if n and 1 <= n <= 40 else None
+
+
+def plan_refresh():
+    """Add to the programme the weeks the plan lacks (or only guessed) once teachers have put files in for them.
+    Each week's files are looked at once (data/plan_refresh.json), so nothing is asked twice."""
+    if not CONFIG["subjects"] or "term" not in CONFIG or not (api_key() or agy_on()) or not PLAN_LOCK.acquire(blocking=False):
+        return
+    try:
+        cur = week_of(date.today()) or 0
+        done, added, resort = load("plan_refresh.json", {}), [], []
+        for subj, sub in CONFIG["subjects"].items():
+            plan = {w["week"]: w for w in sub.get("plan", [])}
+            by_week = defaultdict(list)
+            for f in ALL_FILES:
+                if f.startswith(subj + "/") and (TEXT / f).stat().st_size > 60:
+                    n = file_week(f)
+                    if n and n <= max(cur + 1, 1) and (n not in plan or plan[n].get("guess")):
+                        by_week[n].append(f)
+            todo = {n: fs for n, fs in by_week.items() if done.get(f"{subj}|{n}") != len(fs)}
+            if not todo:
+                continue
+            topics = "\n".join(f"- {t['id']}: {t['name']}" for t in sub["topics"])
+            evidence = "\n\n".join(f"WEEK {n} FILES:\n" + "\n".join(
+                f"- {f.removesuffix('.txt')}: " + re.sub(r"\s+", " ", (TEXT / f).read_text(errors="ignore"))[:250] for f in fs[:25])
+                for n, fs in sorted(todo.items()))
+            try:
+                out = gemini([{"role": "user", "parts": [{"text":
+                    f"{subj}: the course plan is missing weeks (or only guessed them). From the files teachers put in for "
+                    "those weeks, say for each week which topics are taught (ids from the list; if the week clearly starts "
+                    "a topic that is not in the list, add it in new_topics with a short lowercase id using the same prefix "
+                    "as the others and a clear name, and use that id in topics too), a one-line focus, and any assessment "
+                    "that week (coursework, test, presentation; empty if none). Use only what the files show.\n\n"
+                    f"TOPICS:\n{topics}\n\nEXISTING PLAN (week: topics): "
+                    + "; ".join(f"{w['week']}: {', '.join(w['topics'])}" for w in sub.get("plan", [])) + "\n\n" + evidence}]}],
+                    None, PLAN_SCHEMA, 0.1, think=False)
+            except GeminiError as e:
+                print("plan refresh:", e)
+                return
+            with LOCK:
+                cfg = json.loads(TOPICS_FILE.read_text())
+                write_atomic(DATA / "topics.before-update.json", json.dumps(cfg, ensure_ascii=False, indent=2))   # the last version, just in case
+                csub = cfg["subjects"][subj]
+                ids = {t["id"] for s2 in cfg["subjects"].values() for t in s2["topics"]}
+                for nt in [x for w in out.get("weeks", []) for x in w.get("new_topics") or []]:
+                    nid = re.sub(r"[^a-z0-9-]+", "-", str(nt.get("id", "")).lower()).strip("-")[:40]
+                    if nid and nid not in ids:
+                        csub["topics"].append({"id": nid, "code": str(nt.get("code") or ""), "name": str(nt["name"])[:80], "sources": []})
+                        ids.add(nid)
+                valid = {t["id"] for t in csub["topics"]}
+                plan2 = {w["week"]: w for w in csub.get("plan", [])}
+                for w in out.get("weeks", []):
+                    n = w.get("week")
+                    if n not in todo:
+                        continue
+                    tids = [t for t in w.get("topics", []) if t in valid]
+                    if not tids:
+                        continue
+                    entry = {"week": n, "topics": tids, "focus": str(w.get("focus", ""))[:200]}
+                    if str(w.get("assessment") or "").strip():
+                        entry["assessment"] = str(w["assessment"])[:120]
+                    plan2[n] = entry
+                    added.append((subj, n))
+                    resort.extend(todo[n])
+                csub["plan"] = [plan2[k] for k in sorted(plan2)]
+                write_atomic(TOPICS_FILE, json.dumps(cfg, ensure_ascii=False, indent=2))
+                load_config()
+            for n, fs in todo.items():
+                done[f"{subj}|{n}"] = len(fs)
+            save("plan_refresh.json", done)
+        if added:
+            by = defaultdict(list)
+            for subj, n in added:
+                by[subj].append(n)
+            notify([{"id": f"plan:{subj}:{','.join(map(str, ns))}", "kind": "timetable", "subject": subj, "link": f"#/week/{max(ns)}",
+                     "title": f"{SHORT_SUBJECT.get(subj, subj)}: programme updated",
+                     "text": "Week " + ", ".join(map(str, sorted(ns))) + " added from your teachers' files."} for subj, ns in by.items()])
+            with LOCK:                           # the added weeks' files: sort them again, now that their topics exist
+                smap = sorted_map()
+                for f in resort:
+                    if smap.get(f, {}).get("by") == "ai":
+                        del smap[f]
+                save("file_topics.json", smap)
+            threading.Thread(target=lambda: _quiet(auto_sort, resort), daemon=True).start()
+    finally:
+        PLAN_LOCK.release()
+
+
+def plan_loop():
+    """Once a day (a new week starts on Monday): bring the programme up to date."""
+    time.sleep(300)
+    while True:
+        _quiet(plan_refresh)
+        time.sleep(6 * 3600)
+
+
 def api_week(b):
     """One teaching week as a lesson page: per subject the week's topics, their slides, worksheets, readings,
     videos and sources (files from that week's folders first)."""
     n = int(b.get("week") or week_of(date.today()) or 1)
     prog = api_program(None)
-    wk = re.compile(rf"(?:week\s*0?{n}\b|\bw{n}l\d|\bwk\s*0?{n}\b)", re.I)
     subjects = []
     for s in prog.get("subjects", []):
         w = next((x for x in s["weeks"] if x["week"] == n), None)
@@ -1355,7 +1473,7 @@ def api_week(b):
             if tid not in TOPICS:
                 continue
             files = [f for f in topic_files(tid, shared=False) if (TEXT / f).stat().st_size > 60]
-            this_week = [f for f in files if wk.search(f)]
+            this_week = [f for f in files if file_week(f) == n]
             pick = this_week or files[:15]
             groups = defaultdict(list)
             for f in pick:
@@ -1365,7 +1483,7 @@ def api_week(b):
                            "links": api_topic_links({"topic": tid})["links"], "learn": learn_summary(tid),
                            "review": bool(review_load(tid).get("md"))})
         if not topics:                           # the plan says nothing for this week: the files in its "Week n" folders
-            loose = [f for f in ALL_FILES if f.startswith(s["name"] + "/") and wk.search(f) and (TEXT / f).stat().st_size > 60]
+            loose = [f for f in ALL_FILES if f.startswith(s["name"] + "/") and file_week(f) == n and (TEXT / f).stat().st_size > 60]
             if loose:
                 groups = defaultdict(list)
                 for f in loose[:30]:
@@ -2016,7 +2134,7 @@ def start_sync(mode="sync"):
         raise ValueError("Sync isn't installed: run  python3 -m venv .venv && .venv/bin/pip install playwright pypdf python-pptx python-docx  in study-app")
     args = [str(VENV_PY), str(APP / "sync.py")] + ([mode] if mode in ("login", "courses") else [])
     with SYNC_START:                              # the auto loop and the button can fire together
-        if sync_running():
+        if sync_running() or ONEDRIVE["busy"]:    # OneDrive uses the same Microsoft browser profile: one at a time
             return False
         log = open(DATA / "sync.log", "a")
         proc = SYNC["proc"] = subprocess.Popen(args, cwd=str(APP), stdout=log, stderr=log)
@@ -2035,6 +2153,7 @@ def start_sync(mode="sync"):
         if mode == "sync" and st.get("state") == "idle":       # teachers' OneDrive folders, every time IntoStudy is checked
             _quiet(sort_links)
             _quiet(onedrive_cycle)
+            _quiet(plan_refresh)                                # new weeks in the programme from the new files
     threading.Thread(target=wait, daemon=True).start()
     return True
 
@@ -2218,7 +2337,7 @@ def api_program(_):
     cur = week_of(tdy)
     fresh, edited = fresh_on_intostudy(), fresh_on_intostudy(edited_only=True)
     compass = load("compass.json", {})
-    weeks_all = sorted({w["week"] for sub in CONFIG["subjects"].values() for w in sub.get("plan", [])})
+    weeks_all = sorted({w["week"] for sub in CONFIG["subjects"].values() for w in sub.get("plan", [])} | ({cur} if cur else set()))
     subjects = []
     for name, sub in CONFIG["subjects"].items():
         plan = {w["week"]: w for w in sub.get("plan", [])}
@@ -2603,6 +2722,7 @@ def onedrive_cycle(full=True):
             reload_files()
             _quiet(auto_sort)
             _quiet(notify_files, st.get("added"), st.get("updated"))
+            _quiet(plan_refresh)
     finally:
         ONEDRIVE["busy"] = False
 
@@ -4542,6 +4662,7 @@ if __name__ == "__main__":
     threading.Thread(target=compass_loop, daemon=True).start()
     threading.Thread(target=update_check_loop, daemon=True).start()
     threading.Thread(target=onedrive_soon, daemon=True).start()
+    threading.Thread(target=plan_loop, daemon=True).start()
     _quiet(ensure_helper)                         # an update brings a new helper: put it where Chrome loads it from
     class_resume()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
