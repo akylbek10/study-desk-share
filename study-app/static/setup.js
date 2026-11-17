@@ -63,13 +63,36 @@ function draw() {
   const s = U.st;
   const first = ORDER.find(k => !done[k]()) || null;
   const open = U.open ?? first;
-  $("#steps").innerHTML = ORDER.map((k, i) => {
-    const ok = done[k]();
-    return `<li class="step ${ok ? "done" : ""} ${k === first ? "current" : ""} ${k === open ? "open" : ""}" data-step="${k}">
-      <div class="step-head" data-toggle="${k}"><span class="step-num">${ok ? "✓" : i + 1}</span>
-        <div><div class="step-title">${TITLES[k][0]}</div><div class="step-sub">${TITLES[k][1]}</div></div></div>
-      <div class="step-body">${BODY[k](s)}</div></li>`;
-  }).join("");
+  const list = $("#steps");
+  ORDER.forEach((k, i) => {                 // only a step whose content changed is redrawn, so what the student is
+    const ok = done[k]();                   // typing, ticking or choosing in another step is never wiped
+    const cls = `step ${ok ? "done" : ""} ${k === first ? "current" : ""} ${k === open ? "open" : ""}`;
+    const head = `<div class="step-head" data-toggle="${k}"><span class="step-num">${ok ? "✓" : i + 1}</span>
+        <div><div class="step-title">${TITLES[k][0]}</div><div class="step-sub">${TITLES[k][1]}</div></div></div>`;
+    const body = BODY[k](s);
+    let li = list.querySelector(`[data-step="${k}"]`);
+    if (!li) {
+      li = document.createElement("li"); li.dataset.step = k;
+      li.innerHTML = head + `<div class="step-body"></div>`;
+      list.appendChild(li);
+    }
+    li.className = cls;
+    if (li.dataset.head !== head) { li.firstElementChild.outerHTML = head; li.dataset.head = head; }
+    if (li.dataset.body !== body) {
+      const el = li.querySelector(".step-body");
+      const keep = {};                      // carry over typed text, ticks and open sections into the new content
+      el.querySelectorAll("input[id]:not([type=file])").forEach(x => { keep["#" + x.id] = x.type === "checkbox" ? x.checked : x.value; });
+      el.querySelectorAll(".courses input").forEach(x => { keep["c:" + x.value] = x.checked; });
+      const opened = [...el.querySelectorAll("details")].map(d => d.open);
+      const hadFile = el.querySelector("input[type=file]")?.files?.length;
+      if (hadFile && document.activeElement?.type !== "file") return;   // a chosen screenshot waits for its button
+      el.innerHTML = body;
+      li.dataset.body = body;
+      el.querySelectorAll("input[id]:not([type=file])").forEach(x => { if (("#" + x.id) in keep) x.type === "checkbox" ? x.checked = keep["#" + x.id] : x.value = keep["#" + x.id]; });
+      el.querySelectorAll(".courses input").forEach(x => { if (("c:" + x.value) in keep) x.checked = keep["c:" + x.value]; });
+      el.querySelectorAll("details").forEach((d, n) => { if (opened[n]) d.open = true; });
+    }
+  });
   $("#finish").innerHTML = !first
     ? `<button class="btn primary" type="button" data-act="finish">Open Study Desk</button>
        <span class="step-sub" style="align-self:center">Check your programme first: the next page shows it week by week.</span>`
@@ -118,6 +141,8 @@ const BODY = {
   intostudy: s => {
     const i = s.intostudy, found = Object.entries(i.found || {}), chosen = Object.keys(i.chosen || {});
     if (i.state === "login_window") return `<p>A Chrome window opened. Sign in to IntoStudy there with your university Microsoft account. The window closes by itself when you're in.</p>${stateBox(i.step)}`;
+    if (i.state === "choose" && !found.length) return `<p>No open courses were found on this IntoStudy account. Your courses may not be open yet, or you signed in with a different Microsoft account. Try again later, or sign in again.</p>
+      <div class="row"><button class="btn primary" type="button" data-act="sync-login">Sign in again</button></div>`;
     if (i.state === "choose" || (found.length && !chosen.length && !i.running)) return `<p>These are the courses on your IntoStudy account. Tick the subjects you study (the likely ones are ticked):</p>
       <div class="courses">${found.map(([id, c]) => `<label><input type="checkbox" value="${esc(id)}" ${c.suggested ? "checked" : ""}> ${esc(c.full || c.name)}</label>`).join("")}</div>
       <div class="row"><button class="btn primary" type="button" data-act="courses">Download my courses</button></div>`;

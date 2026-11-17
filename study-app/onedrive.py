@@ -197,24 +197,29 @@ def list_roots():
     status(state="idle", step=f"Found {len(roots)} shared folders and files.", finished=now(), roots=len(roots))
 
 
-def walk(ctx, site, folder, depth=0, out=None):
+def walk(ctx, site, folder, depth=0, out=None, failed=None):
     """Every file under a shared folder (name, path, modified, size)."""
     from urllib.parse import quote
     out = [] if out is None else out
     if depth > 8 or len(out) > 3000:
         return out
-    url = (f"{site}/_api/web/GetFolderByServerRelativePath(decodedurl='{quote(folder)}')?$expand=Files,Folders"
+    url = (f"{site}/_api/web/GetFolderByServerRelativePath(decodedurl='{quote(folder.replace(chr(39), chr(39) * 2))}')?$expand=Files,Folders"
            "&$select=Files/Name,Files/ServerRelativeUrl,Files/TimeLastModified,Files/Length,Folders/Name,Folders/ServerRelativeUrl"
            "&$expand=Files/ModifiedBy&$select=Files/ModifiedBy/Email")
-    r = ctx.request.get(url, headers=JSONH)
-    if not r.ok:
+    try:
+        r = ctx.request.get(url, headers=JSONH)
+        j = r.json() if r.ok else None
+    except Exception:
+        r, j = None, None
+    if j is None:
+        if failed is not None:
+            failed.append(f"{folder.rsplit('/', 1)[-1]} ({r.status if r else 'no answer'})")
         return out
-    j = r.json()
     out += [{"path": f["ServerRelativeUrl"], "modified": f.get("TimeLastModified"), "size": int(f.get("Length") or 0),
              "by": ((f.get("ModifiedBy") or {}).get("Email") or "").lower()} for f in j.get("Files", [])]
     for sub in j.get("Folders", []):
         if sub["Name"] != "Forms":
-            walk(ctx, site, sub["ServerRelativeUrl"], depth + 1, out)
+            walk(ctx, site, sub["ServerRelativeUrl"], depth + 1, out, failed)
         time.sleep(0.2)
     return out
 
@@ -241,6 +246,8 @@ def wanted(files, me, my_names=()):
     copies ("Table (3).docx", "Worksheet Copy15.docx") count once."""
     import re
     domain = me.split("@")[-1] if "@" in me else None
+    if not domain:                                       # we don't know who you are: download nothing (privacy first)
+        return []
     keep, seen = [], set()
     for f in sorted(files, key=lambda f: f["path"]):
         by = f.get("by", "")
@@ -262,6 +269,7 @@ def sync():
     """Download new and changed files from the shared folders mapped to a subject (data/onedrive_map.json)."""
     from urllib.parse import quote
     from playwright.sync_api import sync_playwright
+    status(added=[], updated=[], failed=[])
     found, mapping = load(FOUND, {}), load(MAP, {})
     roots = [r for r in found.get("roots", []) if mapping.get(r["path"])]
     if not roots:
@@ -285,13 +293,20 @@ def sync():
                 try:
                     ctx.pages[0].goto(root["site"], wait_until="domcontentloaded", timeout=90_000)
                     ctx.pages[0].wait_for_timeout(3000)
-                    r = ctx.request.get(root["site"] + "/_api/web/currentuser?$select=Email,Title", headers=JSONH)
-                    me[root["site"]] = (r.json().get("Email") or "").lower() if r.ok else ""
-                    if r.ok and r.json().get("Title"):
-                        my_names.add(r.json()["Title"].split()[0].lower())
                 except Exception:
                     pass
-            files = walk(ctx, root["site"], root["path"]) if root["kind"] == "Folder" else \
+                try:
+                    r = ctx.request.get(root["site"] + "/_api/web/currentuser?$select=Email,Title", headers=JSONH)
+                    j = r.json() if r.ok else {}
+                    me[root["site"]] = (j.get("Email") or "").lower()
+                    if j.get("Title"):
+                        my_names.add(j["Title"].split()[0].lower())
+                except Exception:
+                    me[root["site"]] = ""
+            if root["kind"] == "Folder" and "@" not in me.get(root["site"], ""):
+                failed.append(f"{root['name']} (couldn't check who you are there; will try again)")
+                continue
+            files = walk(ctx, root["site"], root["path"], failed=failed) if root["kind"] == "Folder" else \
                 [{"path": root["path"], "modified": root.get("modified"), "size": 0}]
             base = root["path"].rsplit("/", 1)[0] if root["kind"] != "Folder" else root["path"]
             files = wanted(files, me.get(root["site"], ""), my_names)
@@ -301,17 +316,25 @@ def sync():
                 rel = f["path"][len(base):].strip("/") or f["path"].rsplit("/", 1)[-1]
                 local = "/".join([clean(subject), "OneDrive", clean(root["name"])] + [clean(x) for x in rel.split("/")])
                 status(step=f"OneDrive, {subject}: downloading {i} of {len(todo)}: {rel.rsplit('/', 1)[-1][:60]}")
-                r = ctx.request.get(f"{root['site']}/_api/web/GetFileByServerRelativePath(decodedurl='{quote(f['path'])}')/$value",
-                                    timeout=180_000)
-                if not r.ok:
+                try:
+                    r = ctx.request.get(f"{root['site']}/_api/web/GetFileByServerRelativePath(decodedurl="
+                                        f"'{quote(f['path'].replace(chr(39), chr(39) * 2))}')/$value", timeout=180_000)
+                    body = r.body() if r.ok else None
+                except Exception as e:
+                    failed.append(f"{rel} ({type(e).__name__})")
+                    continue
+                if body is None:
                     failed.append(f"{rel} ({r.status})")
                     continue
                 dest = paths.COURSES / local
+                if not dest.resolve().is_relative_to(paths.COURSES.resolve()):
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(r.body())
+                dest.write_bytes(body)
                 kind = "updated" if f["path"] in manifest else "added"
                 manifest[f["path"]] = {"modified": f["modified"], "local": local}
                 (added if kind == "added" else updated).append({"path": local, "course": subject, "kind": kind, "source": "onedrive"})
+                save(MANIFEST, manifest)
                 time.sleep(0.3)
             save(MANIFEST, manifest)
         ctx.close()

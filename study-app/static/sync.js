@@ -185,7 +185,18 @@ document.addEventListener("click", async e => {
     const r = await api("/api/update", { check: !b.dataset.ready });
     if (!r.newer) { msg.textContent = `You have the latest version (${r.current}).`; busy(b, false); return; }
     if (!r.started) { msg.textContent = `Version ${r.latest} is available (you have ${r.current}).`; b.dataset.ready = "1"; busy(b, false); b.textContent = `Update to ${r.latest}`; return; }
-    msg.textContent = `Updating to ${r.latest}. Study Desk restarts by itself; this page reloads in a moment.`;
-    setTimeout(function wait() { fetch("/api/state").then(x => x.ok ? location.reload() : setTimeout(wait, 2000)).catch(() => setTimeout(wait, 2000)); }, 8000);
+    msg.textContent = `Updating to ${r.latest}…`;
+    const target = r.latest;
+    const poll = async () => {                 // show the real progress; reload only when the new version answers
+      try {
+        const s = await (await fetch("/api/state")).json();
+        if (s.version === target) { location.reload(); return; }
+        const c = await api("/api/update", { check: true });
+        if (c.job?.state === "error") { msg.textContent = `The update failed: ${c.job.error}. Your Study Desk is unchanged.`; busy(b, false); return; }
+        if (c.job?.step) msg.textContent = c.job.step;
+      } catch { msg.textContent = "Restarting…"; }
+      setTimeout(poll, 2000);
+    };
+    setTimeout(poll, 1500);
   } catch (err) { msg.textContent = err.message; busy(b, false); }
 });

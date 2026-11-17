@@ -194,13 +194,16 @@ def signed_in(page):
             page.wait_for_load_state("networkidle", timeout=20_000)
         except Exception:
             pass
+    reached = True
     try:
         page.goto(f"{SITE}/d2l/home", wait_until="domcontentloaded", timeout=60_000)
     except Exception:
-        pass
+        reached = False
     settle()
     if on_d2l(page.url):
         return True
+    if not reached or not (page.url.startswith(SITE) or "microsoftonline.com" in page.url):
+        return None                    # IntoStudy wasn't reached at all (offline, Wi-Fi login page): not a sign-out
     try:
         links = [a.get_attribute("href") for a in page.query_selector_all('a[href*="saml/initiate-login"]')
                  if "staff" not in (a.inner_text() or "").lower()]
@@ -231,7 +234,7 @@ def signed_in(page):
 
 def login():
     from playwright.sync_api import sync_playwright
-    status(state="login_window", step="Sign in to IntoStudy in the Chrome window that opened.", error=None)
+    status(state="login_window", step="Sign in to IntoStudy in the Chrome window that opened.", error=None, added=[], updated=[])
     with sync_playwright() as p:
         ctx = browser(p, headless=False)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -294,9 +297,14 @@ def list_courses():
     with sync_playwright() as p:
         ctx = browser(p, headless=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        if not signed_in(page):
+        ok = signed_in(page)
+        if not ok:
             ctx.close()
-            status(state="login", step="Sign in to IntoStudy first.", signed_in=False, finished=now())
+            if ok is None:
+                status(state="error", step="Couldn't reach IntoStudy (no internet?). Press Connect IntoStudy to try again.",
+                       error="IntoStudy couldn't be reached", finished=now())
+            else:
+                status(state="login", step="Sign in to IntoStudy first.", signed_in=False, finished=now())
             return
         found = enrolled(ctx.request)
         ctx.close()
@@ -322,16 +330,21 @@ def courses(req):
 def sync():
     from playwright.sync_api import sync_playwright
     started = now()
-    status(state="running", step="Opening IntoStudy…", started=started, error=None)
+    status(state="running", step="Opening IntoStudy…", started=started, error=None, added=[], updated=[])
     manifest = load(MANIFEST, {})
     first_run = not manifest
     added, updated, failed = [], [], []
     with sync_playwright() as p:
         ctx = browser(p, headless=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        if not signed_in(page):
+        ok = signed_in(page)
+        if not ok:
             ctx.close()
-            status(state="login", step="Sign in to IntoStudy so Study Desk can fetch new files.", signed_in=False, finished=now())
+            if ok is None:             # offline for a moment: try again later, the sign-in is still fine
+                status(state="error", step="Couldn't reach IntoStudy (no internet?). Will try again automatically.",
+                       error="IntoStudy couldn't be reached", finished=now())
+            else:
+                status(state="login", step="Sign in to IntoStudy so Study Desk can fetch new files.", signed_in=False, finished=now())
             return
         status(signed_in=True)
         req = ctx.request

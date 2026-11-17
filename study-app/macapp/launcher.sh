@@ -77,6 +77,7 @@ if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "$HOME/Applications/Goog
 fi
 
 # 5. the background service: starts with your Mac and restarts if it stops
+case "$BUNDLE" in */AppTranslocation/*) PLIST_BUNDLE="";; *) PLIST_BUNDLE="$BUNDLE";; esac   # opened from Downloads: a new random path every time
 TMP="$(mktemp)"
 cat > "$TMP" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -90,7 +91,7 @@ cat > "$TMP" <<EOF
     <key>STUDY_PORT</key><string>$PORT</string>
     <key>STUDY_LABEL</key><string>$LABEL</string>
     <key>STUDY_PYTHON</key><string>$PY</string>
-    <key>STUDY_APP_BUNDLE</key><string>$BUNDLE</string>
+    <key>STUDY_APP_BUNDLE</key><string>$PLIST_BUNDLE</string>
     <key>PLAYWRIGHT_BROWSERS_PATH</key><string>$PLAYWRIGHT_BROWSERS_PATH</string>
     <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
@@ -120,10 +121,11 @@ else
 fi
 
 # 6. wait for it, then open it (the first time it opens the setup guide by itself)
-for i in $(seq 1 90); do
-  curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/state" && break
-  sleep 1
-done
-curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/state" || fail "Study Desk didn't start (see $HOME_DIR/data/server.log)."
+is_desk() { curl -sf --max-time 2 "http://127.0.0.1:$PORT/api/setup" | grep -q '"home"'; }
+for i in $(seq 1 90); do is_desk && break; sleep 1; done
+if ! is_desk; then
+  curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/" && fail "Another program on this Mac is using port $PORT. Close it and open Study Desk again."
+  fail "Study Desk didn't start (see $HOME_DIR/data/server.log)."
+fi
 echo "ready on $PORT"
 open "http://127.0.0.1:$PORT/"

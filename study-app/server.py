@@ -77,14 +77,17 @@ CONFIG, TOPICS = {}, {}
 def week_start(n, cfg=None):
     """Monday of teaching week n (weeks that start inside a break are skipped)."""
     cfg = CONFIG if cfg is None else cfg
+    if not isinstance(n, int) or n < 1:
+        raise ValueError(f"bad week {n!r}")
     d, k = date.fromisoformat(cfg["term"]["week1"]), 1
-    while True:
+    for _ in range(400):                         # a break that never ends can't spin forever
         in_break = any(b["start"] <= d.isoformat() <= b["end"] for b in cfg.get("breaks", []))
         if not in_break:
             if k == n:
                 return d
             k += 1
         d += timedelta(days=7)
+    raise ValueError(f"week {n} is beyond the term")
 
 
 def week_of(day):
@@ -117,7 +120,17 @@ def load_config():
         del TOPICS[k]
 
 
-load_config()
+try:
+    load_config()
+except Exception as e:                            # a broken programme must never stop the app from starting
+    print(f"topics.json can't be used ({type(e).__name__}: {e}); keeping it as topics.json.bad and starting empty")
+    try:
+        TOPICS_FILE.replace(TOPICS_FILE.with_name("topics.json.bad"))
+    except OSError:
+        pass
+    TOPICS_FILE.write_text(json.dumps({"term": {"name": "Semester 1", "week1": date.today().isoformat()},
+                                       "subjects": {}, "exams": [], "timetable": []}, indent=2))
+    load_config()
 
 
 # What kind of subject it is decides how questions and notes are written. topics.json can say it per subject
@@ -2148,7 +2161,10 @@ def start_sync(mode="sync"):
         except Exception as e:
             print("sort:", e)
         st = load("sync_status.json", {})
-        if mode == "sync" or st.get("added") or st.get("updated"):
+        if st.get("state") == "login" and mode == "sync":
+            notify([{"id": f"signin:intostudy:{today()}", "kind": "update", "link": "#/settings",
+                     "title": "IntoStudy needs you to sign in again", "text": "Settings → IntoStudy files → Sign in again."}])
+        if proc.returncode == 0 and st.get("state") == "idle" and (st.get("added") or st.get("updated")):
             _quiet(notify_files, st.get("added"), st.get("updated"))
         if mode == "sync" and st.get("state") == "idle":       # teachers' OneDrive folders, every time IntoStudy is checked
             _quiet(sort_links)
@@ -2187,6 +2203,11 @@ def api_sync_start(b):
 
 def auto_sync_loop():
     """Check IntoStudy for new files on start and then every few hours while the app is open."""
+    for name in ("sync_status.json", "onedrive_status.json", "compass_status.json"):   # left over from before a restart
+        st = load(name, {})
+        if st.get("state") in ("running", "login_window"):
+            st.update(state="idle", step="The last check was interrupted.")
+            save(name, st)
     time.sleep(20)
     while True:
         try:
@@ -2194,7 +2215,9 @@ def auto_sync_loop():
             last = st.get("last_ok") or st.get("finished") or ""
             due = not last or datetime.fromisoformat(last) < datetime.now() - timedelta(hours=SYNC_EVERY_H)
             chosen = CONFIG.get("intostudy_courses") or load("courses.json", {})   # a new install: after the guide
-            if VENV_PY.exists() and chosen and due and st.get("state") not in ("login", "login_window", "choose") \
+            # signed out: try quietly again twice a day (Microsoft usually remembers this browser), never in a loop
+            stale = st.get("state") == "login" and (st.get("finished") or "") < (datetime.now() - timedelta(hours=12)).isoformat()
+            if VENV_PY.exists() and chosen and due and (st.get("state") not in ("login", "login_window", "choose") or stale) \
                     and not sync_running():
                 start_sync()
         except Exception as e:
@@ -2402,13 +2425,14 @@ def api_compass(b):
     if r.get("subject") not in CONFIG["subjects"]:
         raise ValueError("Couldn't tell which subject this is. Paste a bit more of the page.")
     ok = lambda ids: [t for t in ids or [] if t in TOPICS and TOPICS[t]["subject"] == r["subject"]]
-    entry = {"week": r.get("week") or cur, "topics": ok(r.get("topics")), "next_topics": ok(r.get("next_topics")),
+    wk = r.get("week") if isinstance(r.get("week"), int) and r["week"] >= 1 else cur
+    entry = {"week": wk, "topics": ok(r.get("topics")), "next_topics": ok(r.get("next_topics")),
              "summary": r.get("summary", ""), "items": (r.get("items") or [])[:20], "date": today(),
              "assessments": [{"name": str(a["name"])[:120], "date": a["date"]} for a in r.get("assessments") or []
                              if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(a.get("date", "")))][:10],
-             "lessons": [{"date": (week_start(r.get("week") or cur) + timedelta(days=l["weekday"] - 1)).isoformat(),
+             "lessons": [{"date": (week_start(wk) + timedelta(days=l["weekday"] - 1)).isoformat(),
                           "topic": l["topic"], "what": l.get("what", "")}
-                         for l in r.get("lessons") or [] if 1 <= l.get("weekday", 0) <= 7 and ok([l.get("topic")])],
+                         for l in r.get("lessons") or [] if wk and 1 <= l.get("weekday", 0) <= 7 and ok([l.get("topic")])],
              "text": text[:5000]}
     with LOCK:
         c = load("compass.json", {})
@@ -2489,6 +2513,22 @@ COMPASS_MAP_SCHEMA = {"type": "object", "properties": {"pairs": {"type": "array"
     "activity": {"type": "string"}, "subject": {"type": "string"}}, "required": ["activity", "subject"]}}}, "required": ["pairs"]}
 
 
+COMPASS_APPLY, COMPASS_AGAIN = threading.Lock(), threading.Event()
+
+
+def compass_apply_bg():
+    """Apply the latest Compass read; never two at once (that duplicated tasks and AI calls)."""
+    COMPASS_AGAIN.set()
+    while COMPASS_AGAIN.is_set():
+        if not COMPASS_APPLY.acquire(blocking=False):
+            return                                    # the running one loops once more and picks up the newer read
+        try:
+            COMPASS_AGAIN.clear()
+            _quiet(compass_apply)
+        finally:
+            COMPASS_APPLY.release()
+
+
 def compass_running():
     p = COMPASS["proc"]
     return p is not None and p.poll() is None
@@ -2526,7 +2566,7 @@ def start_compass(mode="fetch"):
         proc.wait()
         log.close()
         if proc.returncode == 0 and load("compass_status.json", {}).get("state") == "idle":
-            _quiet(compass_apply)
+            compass_apply_bg()
     threading.Thread(target=wait, daemon=True).start()
     return True
 
@@ -2621,6 +2661,9 @@ def api_compass_push(b):
     if b.get("diag"):
         save("compass_diag.json", {"at": now_, **b["diag"]})   # what the helper saw, for fixing problems
     if b.get("signin") or (not b.get("calendar") and not b.get("error")):
+        if st.get("last_ok"):                     # it worked before: tell the student once a day
+            notify([{"id": f"signin:compass:{today()}", "kind": "update", "link": "#/settings",
+                     "title": "Compass needs you to sign in again", "text": "Open Compass in Chrome and sign in; the helper does the rest."}])
         st.update(state="login", signed_in=False, via="extension", seen=now_, finished=now_,
                   step="Sign in to Compass in Chrome (the Study Desk helper reads it from there).")
         save("compass_status.json", st)
@@ -2636,7 +2679,7 @@ def api_compass_push(b):
     st.update(state="idle", signed_in=True, via="extension", seen=now_, finished=now_, last_ok=now_, error=None,
               step="Read Compass in Chrome." + (f" Not available: {', '.join(bad)}." if bad else ""))
     save("compass_status.json", st)
-    threading.Thread(target=lambda: _quiet(compass_apply), daemon=True).start()
+    threading.Thread(target=compass_apply_bg, daemon=True).start()
     return {"ok": True}
 
 
@@ -2716,9 +2759,9 @@ def onedrive_cycle(full=True):
             if onedrive_run("list") or load("onedrive_status.json", {}).get("state") == "login":
                 return
         onedrive_map()
-        onedrive_run("sync")
+        code = onedrive_run("sync")
         st = load("onedrive_status.json", {})
-        if st.get("added") or st.get("updated"):
+        if code == 0 and st.get("state") == "idle" and (st.get("added") or st.get("updated")):
             reload_files()
             _quiet(auto_sort)
             _quiet(notify_files, st.get("added"), st.get("updated"))
@@ -2810,6 +2853,13 @@ def compass_subjects(activities):
                     known[x["activity"]] = x["subject"] if x.get("subject") in subjects else ""
         except GeminiError as e:
             print("compass map:", e)
+            out = dict(known)                # this time by name only; asked again next time
+            for a in todo:
+                out.setdefault(a, next((s for s in subjects if s.lower() in a.lower()), ""))
+                if out[a]:
+                    known[a] = out[a]
+            save("compass_map.json", known)
+            return out
         for a in todo:                       # anything still unknown: by name
             known.setdefault(a, next((s for s in subjects if s.lower() in a.lower()), ""))
         save("compass_map.json", known)
@@ -2931,7 +2981,7 @@ def compass_apply():
         body = strip_html(n.get("Content1")) + "\n" + strip_html(n.get("Content2"))
         who, title = str(n.get("UserName") or "").strip(), strip_html(n.get("Title"))
         subj = compass_subjects([cls]).get(cls, "") if cls else ""
-        notify([{"id": f"post:{nid}", "ts": when.isoformat(timespec="seconds") if when else None,
+        notify([{"id": f"post:{nid}",
                  "kind": "post" if cls else "news", "subject": subj, "link": "#/program" if cls else "#/today",
                  "title": (f"{who} posted in {SHORT_SUBJECT.get(subj, subj or cls)}" if cls else f"{who or 'Compass'}: school news"),
                  "text": (title or body.strip().split("\n")[0])[:160]}])
@@ -2947,8 +2997,8 @@ def compass_apply():
             notify([{"id": f"task:{x}", "kind": "task", "subject": r["subject"], "link": "#/today",
                      "title": f"{SHORT_SUBJECT.get(r['subject'], r['subject'])}: homework from {who or 'Compass'}", "text": x}
                     for x in r.get("tasks_added", [])])
-        except (ValueError, GeminiError, KeyError):
-            pass
+        except Exception as e:                  # one odd post never stops the rest from being recorded
+            print("compass post:", type(e).__name__, e)
     auto["news_ids"] = sorted(read)[-500:]
     auto["applied"] = datetime.now().isoformat(timespec="seconds")
     save("compass_auto.json", auto)
@@ -4072,7 +4122,8 @@ def curl_download(url, dest, job, label):
         size = int((re.findall(r"(?im)^content-length:\s*(\d+)", head) or [0])[-1])
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
-    proc = subprocess.Popen(["curl", "-fsSL", "--retry", "3", "-o", str(dest), url], stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(["curl", "-fsSL", "--retry", "3", "--connect-timeout", "30", "--speed-time", "60",
+                             "--speed-limit", "1024", "-o", str(dest), url], stderr=subprocess.PIPE, text=True)
     while proc.poll() is None:
         got = dest.stat().st_size if dest.exists() else 0
         job["step"] = f"{label}: {got >> 20}" + (f" of {size >> 20} MB" if size else " MB")
@@ -4201,8 +4252,10 @@ def api_setup_agy(b):
         os.write(AGY_SIGNIN["fd"], code.encode() + b"\r")
         return {"ok": True}
     if act == "terminal":                 # fallback: the ordinary sign-in in a Terminal window
-        script = f'tell application "Terminal" to do script "{AGY}"\ntell application "Terminal" to activate'
-        subprocess.run(["osascript", "-e", script], timeout=20)
+        if not os.path.exists(AGY):
+            raise ValueError("Install Antigravity first.")
+        subprocess.run(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (quoted form of item 1 of argv)',
+                        "-e", 'tell application "Terminal" to activate', "-e", "end run", AGY], timeout=20)
         return {"ok": True}
     if act == "test":
         return {"answer": agy_call([{"role": "user", "parts": [{"text": "Reply with exactly: Study Desk is ready."}]}],
@@ -4282,7 +4335,7 @@ def build_programme():
     JOBS["programme"]["step"] = "Programme ready. Sorting the remaining files into topics…"
     threading.Thread(target=lambda: (_quiet(auto_sort), _quiet(sort_links)), daemon=True).start()
     if compass_connected():                      # now the timetable can be matched to the new subjects
-        threading.Thread(target=lambda: _quiet(compass_apply), daemon=True).start()
+        threading.Thread(target=compass_apply_bg, daemon=True).start()
 
 
 def api_setup_programme(b):
@@ -4327,9 +4380,9 @@ def api_update(b):
         if latest else None
     newer = bool(asset) and _vtuple(latest) > _vtuple(app_version())
     if b.get("check") or not newer:
-        return {"current": app_version(), "latest": latest or None, "newer": newer}
+        return {"current": app_version(), "latest": latest or None, "newer": newer, "job": JOBS.get("update")}
     run_job("update", install_update, asset["browser_download_url"], latest)
-    return {"current": app_version(), "latest": latest, "newer": True, "started": True}
+    return {"current": app_version(), "latest": latest, "newer": True, "started": True, "job": JOBS.get("update")}
 
 
 def update_check_loop():
@@ -4360,11 +4413,7 @@ def install_update(url, latest):
         code = bundle / "Contents" / "Resources" / "study-app" if bundle else None
         if not code or not (code / "server.py").exists():
             raise RuntimeError("the download doesn't contain Study Desk")
-        old = APP.with_name(APP.name + ".old")
-        shutil.rmtree(old, ignore_errors=True)
-        os.replace(APP, old)                  # running code stays loaded in memory until the restart
-        shutil.copytree(code, APP)
-        target = Path(os.environ.get("STUDY_APP_BUNDLE", ""))   # also swap the app in Applications, when we can
+        target = Path(os.environ.get("STUDY_APP_BUNDLE", ""))   # first the app in Applications, when we can
         if target.name.endswith(".app") and "AppTranslocation" not in str(target) and os.access(target.parent, os.W_OK):
             spare = target.with_name(target.name + ".old")
             shutil.rmtree(spare, ignore_errors=True)
@@ -4374,6 +4423,18 @@ def install_update(url, latest):
                 shutil.rmtree(spare, ignore_errors=True)
             except OSError as e:
                 print("update: couldn't replace the app bundle:", e)
+                if spare.exists():                # put the old app back rather than leave half a copy
+                    shutil.rmtree(target, ignore_errors=True)
+                    os.replace(spare, target)
+        old = APP.with_name(APP.name + ".old")    # then the code the service runs
+        shutil.rmtree(old, ignore_errors=True)
+        os.replace(APP, old)                  # running code stays loaded in memory until the restart
+        try:
+            os.replace(code, APP)             # same disk: a rename, no extra space, nothing half-copied
+        except BaseException:
+            shutil.rmtree(APP, ignore_errors=True)
+            os.replace(old, APP)
+            raise
     job["step"] = f"Updated to {latest}. Restarting…"
     label = os.environ.get("STUDY_LABEL")
     if label:

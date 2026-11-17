@@ -16,7 +16,8 @@ import json
 import mimetypes
 import re
 import sys
-from datetime import date
+import os
+from datetime import date, timedelta
 from pathlib import Path
 
 import paths
@@ -104,6 +105,23 @@ def read_timetable(path, subjects):
     return [c for c in r["timetable"] if c["subject"] in subjects]
 
 
+def write(cfg):
+    """Atomically, keeping the previous programme in data/topics.before-update.json."""
+    if OUT.exists():
+        paths.DATA.mkdir(parents=True, exist_ok=True)
+        (paths.DATA / "topics.before-update.json").write_text(OUT.read_text())
+    tmp = OUT.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    os.replace(tmp, OUT)
+
+
+def valid_day(v):
+    try:
+        return date.fromisoformat(str(v)[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 def main():
     args = sys.argv[1:]
     shot = args[args.index("--timetable") + 1] if "--timetable" in args else None
@@ -112,7 +130,7 @@ def main():
         if not shot:
             sys.exit(f"{OUT.name} already exists. Use --force to redo it, or --timetable <screenshot> to add classes.")
         old["timetable"] = read_timetable(shot, list(old["subjects"]))
-        OUT.write_text(json.dumps(old, ensure_ascii=False, indent=2))
+        write(old)
         return print(f"Timetable updated: {len(old['timetable'])} weekly classes.")
 
     files = sorted(str(p.relative_to(TEXT)).removesuffix(".txt") for p in TEXT.rglob("*.txt")) if TEXT.exists() else []
@@ -141,6 +159,7 @@ def main():
             t["sources"] = ok
         s["shared"] = [p for p in s["shared"] if any(matches(f, p) for f in files)]
         ids = {t["id"] for t in s["topics"]}
+        s["plan"] = [w for w in s["plan"] if isinstance(w.get("week"), int) and 1 <= w["week"] <= 59]   # no "week 0"
         for w in s["plan"]:
             w["topics"] = [i for i in w["topics"] if i in ids]
             if not w.get("guess"):
@@ -155,6 +174,11 @@ def main():
             entry["english"] = True                # English skills subject (EAP): no figures or calculations
         subjects[s["name"]] = entry
 
+    monday = date.today() - timedelta(days=date.today().weekday())
+    r["term"] = {"name": str(r.get("term", {}).get("name") or "Semester 1"),
+                 "week1": valid_day(r.get("term", {}).get("week1")) or monday.isoformat()}
+    r["breaks"] = [{**b, "start": valid_day(b.get("start")), "end": valid_day(b.get("end"))} for b in r.get("breaks", [])
+                   if valid_day(b.get("start")) and valid_day(b.get("end"))]
     cfg = {"_note": "Drafted by setup_topics.py from the course files. 'sources' are path prefixes inside text/ "
                     "('*' = wildcard); 'shared' files go with every topic of the subject; 'plan' is the weekly plan; "
                     "'kind' (maths, science, essay, english) decides how questions and notes are written.",
@@ -165,7 +189,7 @@ def main():
     for k in ("intostudy_courses",):           # keep what the setup guide already chose
         if old.get(k):
             cfg[k] = old[k]
-    OUT.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    write(cfg)
 
     covered = {f for s in subjects.values() for t in s["topics"] for f in files
                if any(matches(f, p) for p in t["sources"] + s["shared"])}
