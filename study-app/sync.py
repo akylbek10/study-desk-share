@@ -62,9 +62,30 @@ def clean(s):
     return s or "untitled"
 
 
+LINKS_FILE = DATA / "links.json"          # {course: {ou, items: [{id, title, url, path, kind}]}}: videos, sources, linked files
+FILE_EXT = {"pptx", "ppt", "docx", "doc", "pdf", "xlsx"}
+
+
+def link_kind(url):
+    low = url.lower().split("?")[0]
+    if low.startswith("d2l:brightspace") and ":video:" in low:
+        return "video-d2l"                     # a video uploaded to IntoStudy itself
+    if low.endswith((".mp4", ".webm", ".mov", ".m4v")):
+        return "video"
+    if "youtube.com/watch" in low or "youtu.be/" in low or "youtube.com/embed" in low:
+        return "youtube"
+    if "loom.com/share" in low or "loom.com/embed" in low:
+        return "loom"
+    if "vimeo.com/" in low:
+        return "vimeo"
+    if "/d2l/common/viewfile.d2lfile/" in low and low.rsplit(".", 1)[-1] in FILE_EXT:
+        return "file"                          # a teacher's slides or worksheet attached as a link
+    return "source"
+
+
 def walk_toc(toc, cname):
-    """List the file topics of a course with their paths, plus web links."""
-    files, links, seen = [], [], set()
+    """List the file topics of a course with their paths, plus web links (videos, sources, linked files)."""
+    files, links, seen, rich = [], [], set(), []
 
     def walk(m, path):
         for t in m.get("Topics") or []:
@@ -72,6 +93,19 @@ def walk_toc(toc, cname):
             if t.get("TypeIdentifier") != "File":
                 if url:
                     links.append(f"- [{t.get('Title')}]({url if url.startswith('http') else SITE + url})  ({path})")
+                    kind = link_kind(url)
+                    rich.append({"id": str(t.get("TopicId")), "title": t.get("Title") or "", "path": path, "kind": kind,
+                                 "url": url if url.startswith(("http", "d2l:")) else SITE + url})
+                    if kind == "file":         # download it like any other file
+                        from urllib.parse import unquote
+                        n = clean(unquote(url.split("?")[0].rsplit("/", 1)[-1]))
+                        p, k = f"{path}/{n}", 2
+                        while p in seen:
+                            p = re.sub(r"(\.[^./]+)?$", lambda mm: f" ({k})" + (mm.group(0) or ""), f"{path}/{n}", count=1)
+                            k += 1
+                        seen.add(p)
+                        files.append({"id": f"link:{t['TopicId']}", "path": p, "modified": t.get("LastModifiedDate") or "",
+                                      "title": t.get("Title") or n, "url": SITE + url if url.startswith("/") else url})
                 continue
             ext = url.split("?")[0].rsplit(".", 1)[-1].lower() if "." in url.split("?")[0] else ""
             if ext in SKIP:
@@ -91,6 +125,7 @@ def walk_toc(toc, cname):
 
     for i, m in enumerate(toc.get("Modules") or [], 1):
         walk(m, f"{clean(cname)}/{i:02d} {clean(m.get('Title'))}")
+    walk_toc.rich = rich
     return files, links
 
 
@@ -309,6 +344,9 @@ def sync():
                 failed.append(f"{cname}: contents ({r.status})")
                 continue
             files, links = walk_toc(r.json(), cname)
+            all_links = load(LINKS_FILE, {})
+            all_links[cname] = {"ou": ou, "items": walk_toc.rich}
+            save(LINKS_FILE, all_links)
             lp = COURSES_DIR / clean(cname) / "_links.md"
             lp.parent.mkdir(parents=True, exist_ok=True)
             lp.write_text(f"# {cname}: web links\n\n" + "\n".join(links) + "\n")
@@ -330,7 +368,8 @@ def sync():
                 if not str(dest).startswith(str(COURSES_DIR.resolve())):
                     continue
                 try:
-                    fr = req.get(f"{SITE}/d2l/api/le/{API_VER}/{ou}/content/topics/{f['id']}/file", timeout=180_000)
+                    fr = req.get(f["url"] if f.get("url") else f"{SITE}/d2l/api/le/{API_VER}/{ou}/content/topics/{f['id']}/file",
+                                 timeout=180_000)
                     if not fr.ok:
                         raise RuntimeError(fr.status)
                     data = fr.body()

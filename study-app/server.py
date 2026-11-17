@@ -341,10 +341,28 @@ AGY_TIMEOUT = 480                                                     # seconds;
 AGY_PROJECT = os.environ.get("AGY_PROJECT") or read_env().get("AGY_PROJECT") or "Study Desk"   # keeps these chats apart in Antigravity
 
 
+AGY_QUOTA = {}      # model -> time.time() when its quota is back
+
+
+def agy_out_of_quota(model, err):
+    m = re.search(r"(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?\s*$", err.split("Resets in", 1)[-1].strip().rstrip(".")) if "Resets in" in err else None
+    secs = (int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)) if m else 3600
+    AGY_QUOTA[model] = time.time() + max(secs, 600)
+    print(f"agy: {model} is out of quota for {secs // 3600}h; using the next model", flush=True)
+
+
+def agy_chain(think):
+    """The chosen model first, then Gemini Flash (high, medium, low): whichever still has quota."""
+    order = [agy_model(think), "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", agy_model(not think)]
+    chain = list(dict.fromkeys(m for m in order if m))
+    ok = [m for m in chain if AGY_QUOTA.get(m, 0) < time.time()]
+    return ok or chain[-1:]
+
+
 def agy_model(think):
     """Models come from .env (the setup guide writes them from `agy models`); read on every call."""
     if think:   # tutor, tests, notes
-        return os.environ.get("AGY_MODEL") or read_env().get("AGY_MODEL") or "gemini-4-argon-high"
+        return os.environ.get("AGY_MODEL") or read_env().get("AGY_MODEL") or "gemini-3.8-flash-high"
     return os.environ.get("AGY_FAST_MODEL") or read_env().get("AGY_FAST_MODEL") or "gemini-3.8-flash-medium"   # sorting
 
 
@@ -392,17 +410,23 @@ def agy_call(contents, system=None, schema=None, think=True):
                   "edit files, browse or search" + (", apart from opening the attached image files" if n_img else "")
                   + ". Reply directly with the answer itself.\n\n"
                   + (f"INSTRUCTIONS:\n{system}\n\n" if system else "") + body)
-        cmd = [AGY, "-p=", "--input-format", "stream-json", "--output-format", "stream-json",
-               "--model", agy_model(think), "--sandbox", "--project", AGY_PROJECT]
-        if schema:
-            cmd += ["--json-schema", json.dumps(_no_ordering(schema))]
         msg = json.dumps({"event": "user", "message": {"role": "user", "content": prompt}}) + "\n"
-        with AGY_SLOTS:
-            try:
-                r = subprocess.run(cmd, input=msg, capture_output=True, text=True, cwd=work, timeout=AGY_TIMEOUT, env=agy_env())
-            except subprocess.TimeoutExpired:
-                raise AgyError(f"no answer in {AGY_TIMEOUT // 60} minutes")
-        res = next((json.loads(l)["result"] for l in r.stdout.splitlines() if l.startswith('{"event":"result"')), None)
+        for model in agy_chain(think):         # a model whose quota ran out is skipped until it resets
+            cmd = [AGY, "-p=", "--input-format", "stream-json", "--output-format", "stream-json",
+                   "--model", model, "--sandbox", "--project", AGY_PROJECT]
+            if schema:
+                cmd += ["--json-schema", json.dumps(_no_ordering(schema))]
+            with AGY_SLOTS:
+                try:
+                    r = subprocess.run(cmd, input=msg, capture_output=True, text=True, cwd=work, timeout=AGY_TIMEOUT, env=agy_env())
+                except subprocess.TimeoutExpired:
+                    raise AgyError(f"no answer in {AGY_TIMEOUT // 60} minutes")
+            res = next((json.loads(l)["result"] for l in r.stdout.splitlines() if l.startswith('{"event":"result"')), None)
+            err = (res or {}).get("error") or ""
+            if res and res.get("status") != "SUCCESS" and re.search(r"quota|rate limit|resets in", err, re.I):
+                agy_out_of_quota(model, err)
+                continue
+            break
         if not res or res.get("status") != "SUCCESS":
             raise AgyError((res or {}).get("error") or (r.stderr or r.stdout)[-300:] or f"exit {r.returncode}")
     finally:
@@ -874,7 +898,7 @@ def api_state(_):
             "model": p["settings"].get("model", ""), "name": p["settings"].get("name", ""),
             "setup_needed": needs_setup(), "app": bool(os.environ.get("STUDY_HOME")), "version": app_version(),
             "compass": compass_public(),
-            "telegram": (DATA / "agent_state.json").exists(), "unread": unread_count(),      # the Telegram agent (Hermes) has been used here
+            "telegram": (DATA / "agent_state.json").exists(), "unread": unread_count(), "onedrive": onedrive_public(),      # the Telegram agent (Hermes) has been used here
             "due_total": sum(c["due"] <= tdy for c in cards)}
 
 
@@ -1228,6 +1252,133 @@ def api_topic_files(b):
                       "folder": " / ".join(re.sub(r"^\d+\s+", "", x) for x in parts[1:-1]),
                       "readable": size > 60, "original": bool(original_for(f))})
     return {"files": files}
+
+
+def topic_links(tid):
+    """Videos, sources and other links teachers put on IntoStudy for this topic (from the last sync).
+    A link belongs to the topic whose folder it sits in, or else to the topic most files of its folder went to."""
+    smap, out = sorted_map(), []
+    sorted_links = load("link_topics.json", {})          # what the AI decided for links no folder rule covers
+    folder_topic = {}
+    for f in ALL_FILES:                                  # folder -> the topic most of its files belong to
+        tp = topic_of(f, smap)[0]
+        if tp:
+            folder_topic.setdefault(f.rsplit("/", 1)[0], Counter())[tp] += 1
+    for course, block in load("links.json", {}).items():
+        for l in block.get("items", []) if isinstance(block, dict) else []:
+            if l["kind"] == "file":
+                continue                                 # downloaded: it is among the course files
+            tp = topic_of(l["path"] + "/" + l["title"], {})[0]
+            if not tp and l["path"] in folder_topic:
+                tp = folder_topic[l["path"]].most_common(1)[0][0]
+            if not tp:
+                tp = sorted_links.get(f"{course}|{l['id']}")
+            if tp == tid:
+                out.append({**l, "course": course, "folder": " / ".join(re.sub(r"^\d+\s+", "", x) for x in l["path"].split("/")[1:])})
+    return out
+
+
+def sort_links():
+    """Ask the AI (fast model) which topic each still-unplaced link belongs to; remembered in data/link_topics.json."""
+    if not (api_key() or agy_on()):
+        return
+    done = load("link_topics.json", {})
+    placed = {(l.get("course"), l["id"]) for tid in TOPICS for l in topic_links(tid)}
+    for course, block in load("links.json", {}).items():
+        subj = course if course in CONFIG["subjects"] else None
+        if not subj or not isinstance(block, dict):
+            continue
+        todo = [l for l in block.get("items", []) if l["kind"] != "file" and (course, l["id"]) not in placed
+                and f"{course}|{l['id']}" not in done]
+        ids = [t["id"] for t in CONFIG["subjects"][subj]["topics"]]
+        menu = "\n".join(f"- {t['id']}: {t['name']}" for t in CONFIG["subjects"][subj]["topics"])
+        for i in range(0, len(todo), 40):
+            chunk = todo[i:i + 40]
+            try:
+                out = gemini([{"role": "user", "parts": [{"text":
+                    f"Put each of these {subj} videos and links under the topic it belongs to, judging by its title and "
+                    f"the course folder it sits in. TOPICS:\n{menu}\n- general: the whole course or none of them\n\nLINKS:\n"
+                    + "\n".join(f"{n}. {l['title']} (folder: {l['path']})" for n, l in enumerate(chunk, 1))}]}],
+                    None, SORT_SCHEMA, 0.1, think=False)
+            except GeminiError as e:
+                print("sort links:", e)
+                return
+            for it in out.get("items", []):
+                n = it.get("n")
+                if isinstance(n, int) and 1 <= n <= len(chunk):
+                    done[f"{course}|{chunk[n - 1]['id']}"] = it.get("topic") if it.get("topic") in ids else "general"
+            save("link_topics.json", done)
+
+
+def api_topic_links(b):
+    links = topic_links(b["topic"])
+    for l in links:
+        if l["kind"] == "youtube":
+            m = re.search(r"(?:v=|youtu\.be/|embed/)([\w-]{6,})", l["url"])
+            l["embed"] = f"https://www.youtube-nocookie.com/embed/{m.group(1)}" if m else None
+        elif l["kind"] == "loom":
+            m = re.search(r"loom\.com/(?:share|embed)/(\w+)", l["url"])
+            l["embed"] = f"https://www.loom.com/embed/{m.group(1)}" if m else None
+        elif l["kind"] == "vimeo":
+            m = re.search(r"vimeo\.com/(\d+)", l["url"])
+            l["embed"] = f"https://player.vimeo.com/video/{m.group(1)}" if m else None
+        elif l["kind"] == "video-d2l":
+            l["open"] = f"https://man.intostudy.com/d2l/le/content/{load('links.json', {}).get(l['course'], {}).get('ou', '')}/viewContent/{l['id']}/View"
+    return {"links": links}
+
+
+def file_kind(f):
+    name = f.rsplit("/", 1)[-1].lower().removesuffix(".txt")
+    if name.endswith((".pptx", ".ppt")):
+        return "slides"
+    if re.search(r"answer|mark ?scheme|\bms\b|solution", name):
+        return "answers"
+    if name.endswith((".docx", ".doc")) and re.search(r"worksheet|sqs|rqs|question|task|activity|template|table|case study|w\d+l\d+", name):
+        return "worksheet"
+    if name.endswith(".pdf"):
+        return "reading"
+    return "other"
+
+
+def api_week(b):
+    """One teaching week as a lesson page: per subject the week's topics, their slides, worksheets, readings,
+    videos and sources (files from that week's folders first)."""
+    n = int(b.get("week") or week_of(date.today()) or 1)
+    prog = api_program(None)
+    wk = re.compile(rf"(?:week\s*0?{n}\b|\bw{n}l\d|\bwk\s*0?{n}\b)", re.I)
+    subjects = []
+    for s in prog.get("subjects", []):
+        w = next((x for x in s["weeks"] if x["week"] == n), None)
+        ids = (s["now"] if n == prog.get("week") and s["now"] else (w or {}).get("topics", []))
+        topics = []
+        for tid in ids:
+            if tid not in TOPICS:
+                continue
+            files = [f for f in topic_files(tid, shared=False) if (TEXT / f).stat().st_size > 60]
+            this_week = [f for f in files if wk.search(f)]
+            pick = this_week or files[:15]
+            groups = defaultdict(list)
+            for f in pick:
+                groups[file_kind(f)].append({"path": f, "name": f.rsplit("/", 1)[-1].removesuffix(".txt"),
+                                             "onedrive": "/OneDrive/" in f})
+            topics.append({"id": tid, "name": TOPICS[tid]["name"], "files": groups, "more": len(files) - len(pick),
+                           "links": api_topic_links({"topic": tid})["links"], "learn": learn_summary(tid),
+                           "review": bool(review_load(tid).get("md"))})
+        if not topics:                           # the plan says nothing for this week: the files in its "Week n" folders
+            loose = [f for f in ALL_FILES if f.startswith(s["name"] + "/") and wk.search(f) and (TEXT / f).stat().st_size > 60]
+            if loose:
+                groups = defaultdict(list)
+                for f in loose[:30]:
+                    groups[file_kind(f)].append({"path": f, "name": f.rsplit("/", 1)[-1].removesuffix(".txt"),
+                                                 "onedrive": "/OneDrive/" in f})
+                tid = Counter(topic_of(f, sorted_map())[0] for f in loose).most_common(1)[0][0]
+                topics.append({"id": tid if tid in TOPICS else None, "name": f"Week {n} files", "files": groups,
+                               "more": max(0, len(loose) - 30), "links": [], "learn": learn_summary(tid) if tid in TOPICS else None,
+                               "review": False})
+        subjects.append({"name": s["name"], "focus": (s["compass"] or {}).get("summary") if n == prog.get("week") and s.get("compass") else (w or {}).get("focus"),
+                         "assessment": (w or {}).get("assessment"), "topics": topics})
+    return {"week": n, "current": prog.get("week"), "start": week_start(n).isoformat() if "term" in CONFIG else None,
+            "weeks": prog.get("weeks", []), "subjects": subjects}
 
 
 def api_topic_search(b):
@@ -1881,6 +2032,9 @@ def start_sync(mode="sync"):
         st = load("sync_status.json", {})
         if mode == "sync" or st.get("added") or st.get("updated"):
             _quiet(notify_files, st.get("added"), st.get("updated"))
+        if mode == "sync" and st.get("state") == "idle":       # teachers' OneDrive folders, every time IntoStudy is checked
+            _quiet(sort_links)
+            _quiet(onedrive_cycle)
     threading.Thread(target=wait, daemon=True).start()
     return True
 
@@ -2383,6 +2537,108 @@ def api_compass_helper(b):
         subprocess.run(["open", "-R", str(folder)], timeout=20)
         subprocess.run(["pbcopy"], input=str(folder), text=True, timeout=10)
     return {"folder": str(folder)}
+
+
+ONEDRIVE = {"proc": None, "busy": False}
+ONEDRIVE_MAP_SCHEMA = {"type": "object", "properties": {"pairs": {"type": "array", "items": {"type": "object", "properties": {
+    "n": {"type": "integer"}, "subject": {"type": "string"}}, "required": ["n", "subject"]}}}, "required": ["pairs"]}
+
+
+def onedrive_run(mode):
+    """onedrive.py list | sync | login | explore, one at a time and never together with the IntoStudy sync
+    (they share the Microsoft browser profile). Returns the exit code."""
+    log = open(DATA / "onedrive.log", "a")
+    ONEDRIVE["proc"] = proc = subprocess.Popen([str(VENV_PY), str(APP / "onedrive.py"), mode], cwd=str(APP),
+                                               stdout=log, stderr=log, env=os.environ)
+    code = proc.wait()
+    log.close()
+    return code
+
+
+def onedrive_map():
+    """Which subject each shared folder belongs to: by name ("Sociology/…"), otherwise asked once."""
+    found, mapping = load("onedrive_found.json", {}), load("onedrive_map.json", {})
+    subjects = list(CONFIG["subjects"])
+    todo = [r for r in found.get("roots", []) if r["path"] not in mapping]
+    if not todo or not subjects:
+        return mapping
+    ask = []
+    for r in todo:
+        low = r["path"].lower()
+        hit = [n for n in subjects if n.lower() in low or (CONFIG["subjects"][n].get("short") or "~").lower() in low]
+        if len(hit) == 1:
+            mapping[r["path"]] = hit[0]
+        else:
+            ask.append(r)
+    if ask:
+        try:
+            out = gemini([{"role": "user", "parts": [{"text":
+                f"A student's subjects: {json.dumps(subjects, ensure_ascii=False)}. Teachers shared these OneDrive folders "
+                "with them (path, who shared it). For each, which subject is it for? (Politics or international relations "
+                "= Global Studies if there is no Politics subject; English or academic skills = EAP.) \"\" if none.\n"
+                + "\n".join(f"{i}. {r['path']} (shared by {r.get('by', '')})" for i, r in enumerate(ask))}]}],
+                None, ONEDRIVE_MAP_SCHEMA, 0.0, think=False)
+            for x in out.get("pairs", []):
+                if isinstance(x.get("n"), int) and 0 <= x["n"] < len(ask):
+                    mapping[ask[x["n"]]["path"]] = x["subject"] if x.get("subject") in subjects else ""
+        except GeminiError as e:
+            print("onedrive map:", e)
+    save("onedrive_map.json", mapping)
+    return mapping
+
+
+def onedrive_cycle(full=True):
+    """Find what is shared, link it to subjects, download what is new; then sort and announce the new files."""
+    if ONEDRIVE["busy"] or not VENV_PY.exists():
+        return
+    ONEDRIVE["busy"] = True
+    try:
+        if full or not load("onedrive_found.json", {}):
+            if onedrive_run("list") or load("onedrive_status.json", {}).get("state") == "login":
+                return
+        onedrive_map()
+        onedrive_run("sync")
+        st = load("onedrive_status.json", {})
+        if st.get("added") or st.get("updated"):
+            reload_files()
+            _quiet(auto_sort)
+            _quiet(notify_files, st.get("added"), st.get("updated"))
+    finally:
+        ONEDRIVE["busy"] = False
+
+
+def onedrive_soon():
+    """Shortly after start (also right after an update): OneDrive for anyone who already picked their courses."""
+    time.sleep(90)
+    while sync_running():
+        time.sleep(30)
+    if CONFIG["subjects"] and (CONFIG.get("intostudy_courses") or load("courses.json", {})) \
+            and load("onedrive_status.json", {}).get("state") != "login":
+        _quiet(onedrive_cycle)
+
+
+def api_onedrive(b):
+    """OneDrive / Teams files shared with the student: connect (find + link + download), sign in, or record (dev)."""
+    if not VENV_PY.exists():
+        raise ValueError("This needs the browser part of Study Desk (it comes with the app).")
+    if ONEDRIVE["busy"] or sync_running():
+        raise ValueError("Study Desk is busy with IntoStudy or OneDrive right now. Try again in a minute.")
+    act = b.get("action", "connect")
+    if act in ("login", "explore"):
+        ONEDRIVE["busy"] = True
+        threading.Thread(target=lambda: (_quiet(onedrive_run, act), ONEDRIVE.update(busy=False),
+                                         act == "login" and _quiet(onedrive_cycle)), daemon=True).start()
+    else:
+        threading.Thread(target=lambda: _quiet(onedrive_cycle), daemon=True).start()
+    return {"started": True}
+
+
+def onedrive_public():
+    st, found, mapping = load("onedrive_status.json", {}), load("onedrive_found.json", {}), load("onedrive_map.json", {})
+    roots = found.get("roots", [])
+    return {**{k: st.get(k) for k in ("state", "step", "error", "last_ok")}, "running": ONEDRIVE["busy"],
+            "roots": len(roots), "linked": sorted({v for v in mapping.values() if v}),
+            "files": len(load("onedrive_manifest.json", {}))}
 
 
 def api_compass_connect(b):
@@ -3723,7 +3979,7 @@ def pick_agy_models(models):
 
     def first(pats):
         return next((m for p in pats for m in gem if re.search(p, m)), None)
-    smart = first([r"pro.*high", r"^gemini-[4-9].*high", r"high$", r"medium$", r"."])
+    smart = first([r"flash.*high", r"flash", r"high$", r"."])        # Flash: good and with a generous free quota
     fast = first([r"flash.*medium", r"flash.*low", r"flash", r"."]) or smart
     return smart, fast
 
@@ -3800,7 +4056,7 @@ def agy_check():
         agy_signin_stop()
         smart, fast = pick_agy_models(models)
         env = read_env()
-        if not env.get("AGY_MODEL") or env["AGY_MODEL"] not in models:
+        if not env.get("AGY_MODEL") or env["AGY_MODEL"] not in models or re.search(r"argon|pro-|hydrogen", env["AGY_MODEL"]):
             env_set(AGY_MODEL=smart)
         if not env.get("AGY_FAST_MODEL") or env["AGY_FAST_MODEL"] not in models:
             env_set(AGY_FAST_MODEL=fast)
@@ -3850,6 +4106,7 @@ def api_setup(_):
                       "running": sync_running(), "found": found, "chosen": chosen, "files": len(ALL_FILES),
                       "known": len(load("sync_manifest.json", {}))},
         "compass": compass_public(), "timetable": len(CONFIG.get("timetable", [])),
+        "onedrive": onedrive_public(),
         "programme": {"job": JOBS.get("programme"), "subjects": {n: len(s["topics"]) for n, s in CONFIG["subjects"].items()},
                       "log": tail(DATA / "setup_topics.log", 1500)},
     }
@@ -3903,7 +4160,7 @@ def build_programme():
             p["exams"] = CONFIG.get("exams", [])
             save("progress.json", p)
     JOBS["programme"]["step"] = "Programme ready. Sorting the remaining files into topics…"
-    threading.Thread(target=lambda: _quiet(auto_sort), daemon=True).start()
+    threading.Thread(target=lambda: (_quiet(auto_sort), _quiet(sort_links)), daemon=True).start()
     if compass_connected():                      # now the timetable can be matched to the new subjects
         threading.Thread(target=lambda: _quiet(compass_apply), daemon=True).start()
 
@@ -4011,6 +4268,7 @@ ROUTES = {
     ("POST", "/api/setup/programme"): api_setup_programme,
     ("POST", "/api/setup/done"): api_setup_done,
     ("POST", "/api/compass/connect"): api_compass_connect,
+    ("POST", "/api/onedrive"): api_onedrive,
     ("GET", "/api/notify"): api_notify,
     ("POST", "/api/notify/seen"): api_notify_seen,
     ("GET", "/api/compass/want"): api_compass_want,
@@ -4023,6 +4281,8 @@ ROUTES = {
     ("POST", "/api/file/open"): api_file_open,
     ("POST", "/api/tasks"): api_tasks,
     ("POST", "/api/topic/search"): api_topic_search,
+    ("POST", "/api/topic/links"): api_topic_links,
+    ("POST", "/api/week"): api_week,
     ("POST", "/api/review"): api_review,
     ("POST", "/api/review/mine"): api_review_mine,
     ("POST", "/api/agent"): api_agent,
@@ -4081,7 +4341,7 @@ MAC_ROUTES = {api_file_view, api_work_save, api_file_open, api_agent, api_compas
               api_handoff_open, api_files_sort, api_files_assign, api_files_check, api_sync_start, api_settings,
               api_class_start, api_class_stop, api_class_redo, api_class_delete, api_setup_name, api_setup_agy,
               api_setup_courses, api_setup_programme, api_setup_done, api_compass_connect, api_update, api_timetable_image,
-              api_compass_push, api_compass_helper}
+              api_compass_push, api_compass_helper, api_onedrive}
 PASSWORD = os.environ.get("STUDY_PASSWORD", "")
 SESSION_DAYS = 90
 LOGIN_PAGE = b"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -4281,6 +4541,7 @@ if __name__ == "__main__":
     threading.Thread(target=review_warmup, daemon=True).start()
     threading.Thread(target=compass_loop, daemon=True).start()
     threading.Thread(target=update_check_loop, daemon=True).start()
+    threading.Thread(target=onedrive_soon, daemon=True).start()
     _quiet(ensure_helper)                         # an update brings a new helper: put it where Chrome loads it from
     class_resume()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

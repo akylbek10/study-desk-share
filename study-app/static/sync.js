@@ -142,6 +142,31 @@ document.addEventListener("click", async e => {
   setTimeout(poll, 3000);
 });
 
+/* Settings: OneDrive (files teachers share with you there) */
+function onedriveSettingsHTML() {
+  const o = S.onedrive;
+  if (!o || S.hosted || !SY.st?.installed) return "";
+  const state = o.running ? esc(o.step || "Checking OneDrive…") : o.state === "login" ? "Your Microsoft sign-in for OneDrive has expired."
+    : o.roots ? `${o.roots} shared folders${o.linked.length ? ` (${esc(o.linked.join(", "))})` : ""}, ${o.files} files. Last checked ${syncAgo(o.last_ok)}.`
+    : "Nothing found yet.";
+  return `<section class="panel pad" style="display:grid;gap:12px" id="onedrive-settings">
+    <h2>OneDrive</h2>
+    <p class="muted small">Folders teachers share with you on OneDrive are checked together with IntoStudy, every ${SY.st.every_hours} hours. Only teachers' files and your own work are downloaded, never classmates' copies.</p>
+    <p class="small">${state}</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" type="button" data-onedrive="connect" ${o.running ? "disabled" : ""}>Check OneDrive now</button>
+      ${o.state === "login" ? `<button class="btn primary" type="button" data-onedrive="login">Sign in to OneDrive</button>` : ""}
+    </div></section>`;
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-onedrive]");
+  if (!b || b.disabled) return;
+  busy(b, true, "Starting");
+  try { await api("/api/onedrive", { action: b.dataset.onedrive }); toast(b.dataset.onedrive === "login" ? "A window opened: sign in to Microsoft there." : "Checking OneDrive…"); }
+  catch (err) { toast(err.message); }
+  setTimeout(async () => { await refresh(); if (current.page === "settings") renderSettings(); }, 3000);
+});
+
 /* Settings: update the app (Mac app only) */
 function updateSettingsHTML() {
   if (!S.app) return "";

@@ -51,7 +51,7 @@ async function checkAgy() {
 function schedule() {
   clearTimeout(U.timer);
   const s = U.st, busy = s.engine.install?.state === "running" || s.engine.signing_in || s.intostudy.running
-    || ["login_window", "running"].includes(s.intostudy.state) || s.compass.running || s.programme.job?.state === "running"
+    || ["login_window", "running"].includes(s.intostudy.state) || s.compass.running || s.onedrive?.running || s.programme.job?.state === "running"
     || (ORDER.find(k => !done[k]()) === "compass");          // waiting for the Chrome helper to show up
   U.timer = setTimeout(async () => {
     if (s.engine.signing_in || s.engine.install?.state === "running") await checkAgy();
@@ -77,6 +77,16 @@ function draw() {
 }
 
 const stateBox = (text, cls = "") => text ? `<div class="state ${cls}">${esc(text)}</div>` : "";
+
+function onedriveHTML(o) {
+  const head = `<p><b>OneDrive.</b> Teachers often share slides and worksheets in OneDrive instead of IntoStudy. Study Desk finds the folders shared with you and keeps them up to date too (same Microsoft sign-in).</p>`;
+  if (o.running) return head + stateBox(o.step || "Checking OneDrive…");
+  if (o.state === "login") return head + stateBox("Your Microsoft sign-in for OneDrive has expired.", "bad")
+    + `<div class="row"><button class="btn" type="button" data-act="onedrive-login">Sign in to OneDrive</button></div>`;
+  if (o.roots) return head + stateBox(`${o.roots} shared folders found${o.linked.length ? ` (${o.linked.join(", ")})` : ""}, ${o.files} files. ${o.step || ""}`, "ok")
+    + `<div class="row"><button class="btn quiet" type="button" data-act="onedrive">Check OneDrive now</button></div>`;
+  return head + (o.state === "idle" && o.step ? stateBox(o.step) : "") + `<div class="row"><button class="btn" type="button" data-act="onedrive">Connect OneDrive</button></div>`;
+}
 
 const BODY = {
   name: s => `<p>Your first name, shown on the Today page.</p>
@@ -113,7 +123,8 @@ const BODY = {
       <div class="row"><button class="btn primary" type="button" data-act="courses">Download my courses</button></div>`;
     if (i.running || i.state === "running") return `<p>Downloading your course files and turning them into text. The first time takes 10–20 minutes; you can carry on with the next step meanwhile.</p>${stateBox(i.step || "Working…")}`;
     if (i.files > 0) return stateBox(`${i.files} course files are ready${chosen.length ? ` from ${chosen.length} courses` : ""}. Study Desk checks IntoStudy for new files every 2 hours.`, "ok")
-      + `<div class="row"><button class="btn quiet" type="button" data-act="sync-login">Sign in again</button></div>`;
+      + `<div class="row"><button class="btn quiet" type="button" data-act="sync-login">Sign in again</button></div>`
+      + onedriveHTML(s.onedrive);
     return `<p>Study Desk downloads your course files (slides, notes, worksheets, past papers) from man.intostudy.com and keeps them up to date. A Chrome window opens: sign in there yourself with your university Microsoft account.</p>
       ${i.state === "login" && i.step ? stateBox(i.step) : ""}${i.error ? stateBox(i.error, "bad") : ""}
       <div class="row"><button class="btn primary" type="button" data-act="sync-login">Connect IntoStudy</button></div>`;
@@ -181,6 +192,8 @@ document.addEventListener("click", async e => {
     const ids = [...document.querySelectorAll(".courses input:checked")].map(x => x.value);
     return run(() => api("/api/setup/courses", { ids }), "Downloading your courses…");
   }
+  if (act === "onedrive") return run(() => api("/api/onedrive", { action: "connect" }), "Looking for your OneDrive folders…");
+  if (act === "onedrive-login") return run(() => api("/api/onedrive", { action: "login" }), "A window opened: sign in to Microsoft there");
   if (act === "helper-install") return run(() => api("/api/compass/helper", { action: "install" }), "Now: Developer mode on, then drag the folder onto the Chrome page");
   if (act === "helper-folder") return run(() => api("/api/compass/helper", { action: "folder" }), "Finder shows the folder; its location is copied");
   if (act === "helper-ext") return run(() => api("/api/compass/helper", { action: "extensions" }), "Chrome's extensions page opened");

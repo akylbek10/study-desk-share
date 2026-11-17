@@ -393,7 +393,7 @@ function renderSubject(name) {
 function renderTopic(id, tab) {
   const t = topicById(id);
   if (!t) return renderToday();
-  tab = ["check", "review", "learn", "tutor", "practice", "cards", "files"].includes(tab) ? tab : "check";
+  tab = ["check", "review", "learn", "tutor", "practice", "cards", "files", "watch"].includes(tab) ? tab : "check";
   setNav("subject:" + t.subject, t.name);
   const lv = Math.round(t.confidence || 0);
   const when = taught(t) ? (thisWeek(t) ? "In class this week" : `Taught from ${fmtDay(t.start)}`) : `Class starts ${relDay(t.start)}, ${fmtDay(t.start)}`;
@@ -414,7 +414,7 @@ function renderTopic(id, tab) {
     </div>
     ${keyNotice()}
     <nav class="tabs" aria-label="Topic sections">
-      ${[["check", "Check", "target", t.check_best != null ? `${t.check_best}%` : ""], ["review", "Review notes", "book"], ["learn", "Learn here", "layers", t.learn?.built ? `${t.learn.passed}/${t.learn.subs}` : ""], ["tutor", "Tutor", "chat"], ["practice", "Practice questions", "pen"], ["cards", "Flashcards", "cards", t.cards], ["files", "Course files", "file", t.files]].map(([k, l, ic, n]) =>
+      ${[["check", "Check", "target", t.check_best != null ? `${t.check_best}%` : ""], ["review", "Review notes", "book"], ["learn", "Learn here", "layers", t.learn?.built ? `${t.learn.passed}/${t.learn.subs}` : ""], ["tutor", "Tutor", "chat"], ["practice", "Practice questions", "pen"], ["cards", "Flashcards", "cards", t.cards], ["files", "Course files", "file", t.files], ["watch", "Videos & links", "external"]].map(([k, l, ic, n]) =>
         `<a href="#/topic/${id}/${k}" ${k === tab ? 'aria-current="page"' : ""}>${icon(ic)}${l}${n ? `<span class="n">${n}</span>` : ""}</a>`).join("")}
     </nav>
     <div id="pane"></div>`;
@@ -427,7 +427,7 @@ function renderTopic(id, tab) {
       await refresh(); toast(`Saved: ${CONF_WORDS[+b.dataset.lv]}`);
     } catch (err) { toast(err.message); }
   });
-  ({ check: paneCheck, review: paneReview, learn: paneLearn, tutor: paneTutor, practice: panePractice, cards: paneCards, files: paneFiles })[tab](t);
+  ({ check: paneCheck, review: paneReview, learn: paneLearn, tutor: paneTutor, practice: panePractice, cards: paneCards, files: paneFiles, watch: paneLinks })[tab](t);
 }
 
 /* ----- shared chat renderer (tutor + assistant) ----- */
@@ -894,6 +894,7 @@ function renderSettings() {
       ${updateSettingsHTML()}
       ${syncSettingsHTML()}
       ${compassSettingsHTML()}
+      ${onedriveSettingsHTML()}
       <section class="panel pad" style="display:grid;gap:14px">
         <h2>Gemini</h2>
         <p class="muted small">${S.has_key ? "A key is saved on this Mac. Paste a new one to replace it." : `Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. It's saved only in this app's folder.`}</p>
@@ -1080,6 +1081,7 @@ async function route() {
     else if (page === "profile") await renderProfile();
     else if (page === "settings") renderSettings();
     else if (page === "file") await renderFile(decodeURIComponent(a));
+    else if (page === "week") await renderWeek(a);
     else renderToday();
   } catch (e) {
     view.innerHTML = `<div class="rows empty" style="margin-top:40px"><h3>Study Desk can't reach its server</h3><p>Start it with “Start Study Desk.command” in the study-app folder, then reload this page.</p><p class="small faint">${esc(e.message)}</p></div>`;

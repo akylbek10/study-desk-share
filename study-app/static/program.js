@@ -93,7 +93,7 @@ async function renderProgram() {
         <tbody>${d.weeks.map(n => {
           const st = (subs.find(s => byWeek(s, n)) && byWeek(subs.find(s => byWeek(s, n)), n).start) || "";
           return `<tr class="${n === d.week ? "pg-current" : n < (d.week || 0) ? "pg-past" : ""}" ${n === d.week ? `id="pg-now"` : ""}>
-            <th scope="row"><b>Week ${n}</b><span>${st ? fmtDay(st) : ""}</span>${n === d.week ? `<span class="tag due">this week</span>` : ""}</th>
+            <th scope="row"><a href="#/week/${n}"><b>Week ${n}</b></a><span>${st ? fmtDay(st) : ""}</span>${n === d.week ? `<span class="tag due">this week</span>` : ""}</th>
             ${subs.map(s => cell(s, n)).join("")}</tr>`;
         }).join("")}</tbody></table></div>
       <p class="small muted" style="margin-top:10px">Plans: ${subs.map(s => `${esc(SHORT[s.name] || s.name)}: ${esc(s.plan_source || "")}`).join(" · ")}.</p>
