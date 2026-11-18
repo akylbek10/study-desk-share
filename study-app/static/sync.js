@@ -28,7 +28,7 @@ function syncPaintButton() {
   b.innerHTML = `${st.running ? `<span class="spinner" aria-hidden="true"></span>` : icon(needsLogin(st) ? "external" : "refresh")}<span class="sync-label">${label}</span>`;
   b.setAttribute("aria-label", label);
   b.disabled = !!st.running;
-  b.dataset.tip = st.running ? (st.step || "Working…") : needsLogin(st) ? "Sign in once so Study Desk can fetch new files from IntoStudy" : `Last checked ${syncAgo(st.last_ok)}. Checks automatically every ${st.every_hours} h.`;
+  b.dataset.tip = st.running ? esc(st.step || "Working…") : needsLogin(st) ? "Sign in once so Study Desk can fetch new files from IntoStudy" : `Last checked ${syncAgo(st.last_ok)}. Checks automatically every ${st.every_hours} h.`;
 }
 
 async function syncStart(mode) {
@@ -43,8 +43,9 @@ async function syncStart(mode) {
 function syncPoll() {
   clearTimeout(SY.timer);
   SY.timer = setTimeout(async () => {
-    const wasRunning = SY.st?.running;
+    const was = SY.st, wasRunning = was?.running;
     await syncLoad();
+    if (!SY.st && wasRunning) { SY.st = was; syncPaintButton(); syncPoll(); return; }   // server asleep or restarting: keep waiting
     if (SY.st?.running) return;                 // syncLoad keeps polling
     if (wasRunning) {
       toast(SY.st.error ? `Update failed: ${SY.st.error}` : SY.st.step || "Done.");
@@ -70,7 +71,7 @@ function newFilesHTML() {
       <div style="margin-top:10px"><button class="btn sm primary" type="button" data-sync="login">Connect IntoStudy</button></div></div></div>`;
   }
   const recent = st.recent || [];
-  const head = `<div class="section-head"><h2 id="new-h">New from your teachers</h2><p>${st.running ? esc(st.step || "Updating…") : `Checked ${syncAgo(st.last_ok)}`}${st.running ? "" : ` · <button class="linklike" type="button" data-sync="sync">Update now</button>`} · <a href="#/files">Files check</a></p></div>`;
+  const head = `<div class="section-head"><h2 id="new-h">New from your teachers</h2><p>${st.running ? esc(st.step || "Updating…") : `Checked ${syncAgo(st.last_ok)}`}${st.running ? "" : ` · <button class="linklike" type="button" data-sync="${needsLogin(st) ? "login" : "sync"}">${needsLogin(st) ? "Sign in to IntoStudy" : "Update now"}</button>`} · <a href="#/files">Files check</a></p></div>`;
   if (!recent.length) return `<section class="section" aria-labelledby="new-h">${head}<div class="rows empty-note"><b>Nothing new in the last two weeks</b>New files appear here as soon as teachers upload them.</div></section>`;
   // one row per topic (files outside any topic are grouped by subject), newest first
   const groups = [];
@@ -163,8 +164,9 @@ document.addEventListener("click", async e => {
   if (!b || b.disabled) return;
   busy(b, true, "Starting");
   try { await api("/api/onedrive", { action: b.dataset.onedrive }); toast(b.dataset.onedrive === "login" ? "A window opened: sign in to Microsoft there." : "Checking OneDrive…"); }
-  catch (err) { toast(err.message); }
-  setTimeout(async () => { await refresh(); if (current.page === "settings") renderSettings(); }, 3000);
+  catch (err) { toast(err.message); busy(b, false); return; }
+  const poll = async (n = 0) => { await refresh(); if (S.onedrive?.running && n < 400) setTimeout(() => poll(n + 1), 3000); else if (current.page === "settings") renderSettings(); };
+  setTimeout(poll, 3000);
 });
 
 /* Settings: update the app (Mac app only) */

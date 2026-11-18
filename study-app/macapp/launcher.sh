@@ -71,13 +71,17 @@ if [ ! -x "$PY" ] || [ "$(cat "$VENV/.study-desk-lock" 2>/dev/null)" != "$stamp"
 fi
 
 # 4. a browser for IntoStudy and Compass: your Google Chrome, or Playwright's Chromium if there is no Chrome
-if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "$HOME/Applications/Google Chrome.app" ] && [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+# (stamped with the lock file: a broken download or a newer Playwright is installed again on the next open)
+if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "$HOME/Applications/Google Chrome.app" ] \
+   && [ "$(cat "$PLAYWRIGHT_BROWSERS_PATH/.study-desk-lock" 2>/dev/null)" != "$stamp" ]; then
   notify "Downloading a browser for IntoStudy and Compass (no Google Chrome found)…"
   "$PY" -m playwright install chromium || fail "Couldn't download the browser. Install Google Chrome and open Study Desk again."
+  echo "$stamp" > "$PLAYWRIGHT_BROWSERS_PATH/.study-desk-lock"
 fi
 
 # 5. the background service: starts with your Mac and restarts if it stops
 case "$BUNDLE" in */AppTranslocation/*) PLIST_BUNDLE="";; *) PLIST_BUNDLE="$BUNDLE";; esac   # opened from Downloads: a new random path every time
+PLIST_BUNDLE="$(printf '%s' "$PLIST_BUNDLE" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"   # "INTO & Uni/…" is still valid XML
 TMP="$(mktemp)"
 cat > "$TMP" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -109,6 +113,7 @@ DOMAIN="gui/$(id -u)"
 if ! cmp -s "$TMP" "$PLIST"; then
   echo "installing the service $LABEL"
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
+  for i in $(seq 1 50); do launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break; sleep 0.2; done   # bootout finishes in the background
   mv "$TMP" "$PLIST"
   launchctl bootstrap "$DOMAIN" "$PLIST" || fail "Couldn't start the Study Desk service."
 else

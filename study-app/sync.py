@@ -107,7 +107,8 @@ def walk_toc(toc, cname):
                         files.append({"id": f"link:{t['TopicId']}", "path": p, "modified": t.get("LastModifiedDate") or "",
                                       "title": t.get("Title") or n, "url": SITE + url if url.startswith("/") else url})
                 continue
-            ext = url.split("?")[0].rsplit(".", 1)[-1].lower() if "." in url.split("?")[0] else ""
+            leaf = url.split("?")[0].rsplit("/", 1)[-1]            # the file name, not a dot in a folder name
+            ext = leaf.rsplit(".", 1)[-1].lower() if "." in leaf else ""
             if ext in SKIP:
                 continue
             n = clean(t.get("Title"))
@@ -143,7 +144,7 @@ class Orphans:
         for f in COURSES_DIR.rglob("*"):
             if f.is_file() and not f.name.startswith(("_", ".")):
                 rel = str(f.relative_to(COURSES_DIR))
-                if rel not in claimed:
+                if rel not in claimed and rel.split("/")[1:2] != ["OneDrive"]:   # onedrive.py's files are not ours
                     self.by_size.setdefault(f.stat().st_size, []).append(rel)
 
     def match(self, data):
@@ -205,11 +206,13 @@ def signed_in(page):
     if not reached or not (page.url.startswith(SITE) or "microsoftonline.com" in page.url):
         return None                    # IntoStudy wasn't reached at all (offline, Wi-Fi login page): not a sign-out
     try:
-        links = [a.get_attribute("href") for a in page.query_selector_all('a[href*="saml/initiate-login"]')
-                 if "staff" not in (a.inner_text() or "").lower()]
-        if not links:
-            return False
-        page.goto(links[0], wait_until="domcontentloaded", timeout=60_000)
+        if page.url.startswith(SITE):      # IntoStudy's login page; it may also have sent us to Microsoft already
+            from urllib.parse import urljoin
+            links = [a.get_attribute("href") for a in page.query_selector_all('a[href*="saml/initiate-login"]')
+                     if "staff" not in (a.inner_text() or "").lower()]
+            if not links:
+                return False
+            page.goto(urljoin(page.url, links[0]), wait_until="domcontentloaded", timeout=60_000)   # the href is relative
         deadline = time.time() + 60
         clicked = False
         while time.time() < deadline and not page.url.startswith(SITE):   # wait until Microsoft sends us back
@@ -413,6 +416,8 @@ def sync():
             f"{n_new} new file{'s' * (n_new != 1)}" + (f", {n_upd} updated" if n_upd else "") + ".")
     if first_run:
         step = f"First check done: {len(manifest)} files known. " + step
+    if failed:
+        step += f" {len(failed)} couldn't be fetched; will try again."
     status(state="idle", step=step, finished=now(), last_ok=now(), added=added, updated=updated,
            failed=failed[:50], error=None)
 

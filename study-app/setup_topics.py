@@ -173,17 +173,21 @@ def main():
         if entry["kind"] == "english":
             entry["english"] = True                # English skills subject (EAP): no figures or calculations
         subjects[s["name"]] = entry
+    if not subjects:                               # keep the programme we have rather than write an empty one
+        sys.exit("The AI's answer had none of your subject folders. " + "; ".join(dropped[:5]))
 
     monday = date.today() - timedelta(days=date.today().weekday())
+    week1 = valid_day(r.get("term", {}).get("week1"))
+    week1 = date.fromisoformat(week1) if week1 else monday
     r["term"] = {"name": str(r.get("term", {}).get("name") or "Semester 1"),
-                 "week1": valid_day(r.get("term", {}).get("week1")) or monday.isoformat()}
+                 "week1": (week1 - timedelta(days=week1.weekday())).isoformat()}   # weeks start on Monday
     r["breaks"] = [{**b, "start": valid_day(b.get("start")), "end": valid_day(b.get("end"))} for b in r.get("breaks", [])
-                   if valid_day(b.get("start")) and valid_day(b.get("end"))]
+                   if valid_day(b.get("start")) and valid_day(b.get("end")) and valid_day(b["start"]) <= valid_day(b["end"])]
     cfg = {"_note": "Drafted by setup_topics.py from the course files. 'sources' are path prefixes inside text/ "
                     "('*' = wildcard); 'shared' files go with every topic of the subject; 'plan' is the weekly plan; "
                     "'kind' (maths, science, essay, english) decides how questions and notes are written.",
            "term": r["term"], "breaks": r["breaks"],
-           "exams": [e for e in r["exams"] if re.fullmatch(r"\d{4}-\d{2}-\d{2}", e.get("date", ""))],
+           "exams": [e for e in r["exams"] if re.fullmatch(r"\d{4}-\d{2}-\d{2}", e.get("date", "")) and valid_day(e["date"])],
            "timetable": read_timetable(shot, list(subjects)) if shot else old.get("timetable", []),
            "subjects": subjects}
     for k in ("intostudy_courses",):           # keep what the setup guide already chose

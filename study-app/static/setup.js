@@ -85,7 +85,7 @@ function draw() {
       el.querySelectorAll(".courses input").forEach(x => { keep["c:" + x.value] = x.checked; });
       const opened = [...el.querySelectorAll("details")].map(d => d.open);
       const hadFile = el.querySelector("input[type=file]")?.files?.length;
-      if (hadFile && document.activeElement?.type !== "file") return;   // a chosen screenshot waits for its button
+      if (hadFile) return;                  // a chosen screenshot waits for its button (cleared once it's read)
       el.innerHTML = body;
       li.dataset.body = body;
       el.querySelectorAll("input[id]:not([type=file])").forEach(x => { if (("#" + x.id) in keep) x.type === "checkbox" ? x.checked = keep["#" + x.id] : x.value = keep["#" + x.id]; });
@@ -194,7 +194,7 @@ const BODY = {
 
 document.addEventListener("click", async e => {
   const t = e.target.closest("[data-toggle]");
-  if (t) { U.open = U.open === t.dataset.toggle ? "" : t.dataset.toggle; draw(); return; }
+  if (t) { const cur = U.open ?? (ORDER.find(k => !done[k]()) || null); U.open = cur === t.dataset.toggle ? "" : t.dataset.toggle; draw(); return; }
   const b = e.target.closest("[data-act]");
   if (!b || b.disabled) return;
   const act = b.dataset.act;
@@ -229,10 +229,11 @@ document.addEventListener("click", async e => {
     const f = $("#tt-img").files[0];
     if (!f) return toast("Choose the screenshot first");
     const data = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1]); r.onerror = bad; r.readAsDataURL(f); });
+    $("#tt-img").value = "";                // so the step can redraw and show the result
     return run(async () => { const r = await api("/api/timetable/image", { image: { mime: f.type || "image/png", data } }); toast(`Read ${r.classes} weekly classes.`); });
   }
   if (act === "programme") return run(() => api("/api/setup/programme", {}), "Building your programme…");
-  if (act === "finish") { await api("/api/setup/done", {}); location.href = "/#/program"; }
+  if (act === "finish") { try { await api("/api/setup/done", {}); location.href = "/#/program"; } catch (err) { toast(err.message); } }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "name") $("[data-act=name]").click(); });
 load();

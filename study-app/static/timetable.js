@@ -75,7 +75,7 @@ function renderTimetable() {
   const monday = addDays(S.today, wd >= 6 ? 8 - wd : 1 - wd);
   const days = [0, 1, 2, 3, 4].map(i => addDays(monday, i));
   const first = Math.min(...tt.map(c => toMin(c.start)), 9 * 60), last = Math.max(...tt.map(c => toMin(c.end)), 17 * 60);
-  const h0 = Math.floor(first / 60), h1 = Math.ceil(last / 60), HOUR = 64;
+  const h0 = Math.floor(first / 60), h1 = Math.ceil(last / 60), HOUR = 76;
   const hours = []; for (let h = h0; h < h1; h++) hours.push(h);
   const perSubj = {};
   tt.forEach(c => { perSubj[c.subject] = (perSubj[c.subject] || 0) + (toMin(c.end) - toMin(c.start)) / 60; });
@@ -85,8 +85,8 @@ function renderTimetable() {
   view.innerHTML = `
     <div class="page-head"><div>
       <h1>Timetable</h1>
-      <p class="sub">Week of ${fmtDay(monday, { day: "numeric", month: "long" })}. ${tt.length} ${tt.length === 1 ? "class" : "classes"} a week: ${
-        Object.entries(perSubj).map(([s, h]) => `${esc(SHORT[s] || s)} ${h} h`).join(", ")}. Click a class to open the topic being taught now.</p>
+      <p class="sub">Week of ${fmtDay(monday, { day: "numeric", month: "long" })}. ${tt.length ? `${tt.length} ${tt.length === 1 ? "class" : "classes"} a week: ${
+        Object.entries(perSubj).map(([s, h]) => `${esc(SHORT[s] || s)} ${+h.toFixed(1)} h`).join(", ")}. Click a class to open the topic being taught now.` : "No timetable yet. It comes from Compass: connect it in Settings, or add a screenshot of your timetable in the setup guide."}</p>
     </div></div>
     <div class="tt" style="--hour:${HOUR}px; --hours:${hours.length}">
       <div class="tt-hours" aria-hidden="true"><div class="tt-dayhead"></div>${hours.map(h => `<div class="tt-hour">${String(h).padStart(2, "0")}:00</div>`).join("")}</div>
@@ -103,9 +103,12 @@ function renderTimetable() {
               const t = classTopic(c.subject, d);
               const top = (toMin(c.start) - h0 * 60) / 60 * HOUR, h = (toMin(c.end) - toMin(c.start)) / 60 * HOUR;
               const st = isToday(d) ? classState(c, d) : "";
-              const inner = `<span class="tt-time">${c.start}–${c.end}</span><b>${esc(SHORT[c.subject] || c.subject)}</b>
-                <span class="tt-topic">${t ? esc(t.name) : ""}</span><span class="tt-room">${esc(c.room)} · ${esc(c.teacher)}</span>`;
-              const attrs = `class="tt-class ${st}" style="top:${top}px; height:${h - 4}px; --c:${subjColor(c.subject)}"`;
+              const where = [c.room, c.teacher].filter(Boolean).map(esc).join(" · ");
+              const inner = `<span class="tt-head"><span class="tt-time">${c.start}–${c.end}</span><b>${esc(SHORT[c.subject] || c.subject)}</b></span>
+                ${t ? `<span class="tt-topic">${esc(t.name)}</span>` : ""}${where ? `<span class="tt-room">${where}</span>` : ""}`;
+              const short = toMin(c.end) - toMin(c.start) <= 75 ? "short" : "";
+              const tip = [`${c.start}–${c.end}`, c.subject, t?.name, c.room, c.teacher].filter(Boolean).join(" · ");
+              const attrs = `class="tt-class ${st} ${short}" title="${esc(tip)}" style="top:${top}px; height:${h - 4}px; --c:${subjColor(c.subject)}"`;
               return t ? `<a ${attrs} href="#/topic/${t.id}/check">${inner}</a>` : `<div ${attrs}>${inner}</div>`;
             }).join("")}
             ${nowLine}

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Study Desk: Compass",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Reads your Compass timetable, class news and learning tasks in your own signed-in Chrome and gives them to Study Desk on this Mac. Nothing goes anywhere else.",
   "host_permissions": [
     "https://*.compass.education/*",

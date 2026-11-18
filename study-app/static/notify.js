@@ -23,6 +23,7 @@ async function bellOpen() {
   panel.innerHTML = `<div class="bell-head"><b>Notifications</b></div><div class="bell-empty">Loading…</div>`;
   let d;
   try { d = await api("/api/notify"); } catch (e) { panel.querySelector(".bell-empty").textContent = e.message; return; }
+  if (!NT.open) return;                                      // closed again while loading: nothing was seen
   panel.innerHTML = `<div class="bell-head"><b>Notifications</b>${d.unread ? `<span class="tag due">${d.unread} new</span>` : ""}</div>` + (d.items.length
     ? `<ul class="bell-list">${d.items.map(n => `<li class="${n.unread ? "unread" : ""}"><a href="${esc(n.link || "#/today")}">
         <span class="bell-ic" ${n.subject ? `style="color:${subjColor(n.subject)}"` : ""}>${icon(NT_ICON[n.kind] || "info")}</span>
@@ -35,7 +36,10 @@ async function bellOpen() {
 document.addEventListener("click", e => {
   if (e.target.closest("#bell-btn")) { bellOpen(); return; }
   if (NT.open && !e.target.closest("#bell-panel")) { NT.open = false; $("#bell-panel").hidden = true; $("#bell-btn").setAttribute("aria-expanded", false); }
-  else if (NT.open && e.target.closest("#bell-panel a")) { NT.open = false; $("#bell-panel").hidden = true; }
+  else if (NT.open && e.target.closest("#bell-panel a")) {
+    NT.open = false; $("#bell-panel").hidden = true; $("#bell-btn").setAttribute("aria-expanded", false);
+    if (e.target.closest("a").getAttribute("href") === location.hash) route();   // same page: no hashchange, so redraw with the new data
+  }
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && NT.open) { NT.open = false; $("#bell-panel").hidden = true; $("#bell-btn").focus(); } });
 setInterval(async () => {                                    // new things arrive while the page is open

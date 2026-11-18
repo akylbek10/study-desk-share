@@ -296,7 +296,7 @@ function rulerHTML(topics, exams) {
       <line class="lane" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" />`;
     if (KIND[s] === "english") {
       svg += `<rect x="${x(start)}" y="${y - 3}" width="${x(addDays(S.breaks?.[0]?.start || addDays(start, 90), -1)) - x(start)}" height="6" rx="3" fill="${subjColor(s)}" opacity=".45"
-        data-tip="<b>${esc(SHORT[s])}</b><br>Reading, writing, listening and speaking skills run all semester" tabindex="0" />`;
+        data-tip="<b>${esc(esc(SHORT[s]))}</b><br>Reading, writing, listening and speaking skills run all semester" tabindex="0" />`;
       return;
     }
     for (const t of topics.filter(t => t.subject === s)) {
@@ -325,7 +325,7 @@ function rulerHTML(topics, exams) {
     <span class="legend-item"><span style="width:10px;height:8px;background:var(--ink);clip-path:polygon(0 0,100% 0,75% 50%,100% 100%,0 100%)"></span>Exam</span>`;
   return `<div class="ruler"><div class="ruler-scroll"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Semester timeline with topics, today and exam dates">${svg}</svg></div><div class="ruler-foot">${legend}</div></div>`;
 }
-function addDays(iso, n) { const d = parseDay(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+function addDays(iso, n) { const d = parseDay(iso); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }   // local date: toISOString() is UTC and repeats a day east of UTC+12
 
 /* =====================================================================
    SUBJECTS
@@ -361,7 +361,7 @@ function renderSubject(name) {
   if (!s) return renderSubjects();
   setNav("subject:" + name, name);
   const f = subjectFacts(s);
-  const exam = S.exams.find(e => e.subject === name && e.date >= S.today);
+  const exam = S.exams.filter(e => e.subject === name && e.date >= S.today).sort((a, b) => a.date.localeCompare(b.date))[0];
   view.innerHTML = `
     <div class="page-head"><div>
       <a class="crumb" href="#/subjects">${icon("chevronLeft")}Subjects</a>
@@ -436,13 +436,13 @@ const FOLLOW_UPS = {
   problem: ["Give me a hint", "Show the next step", "Show the full solution"],
   explain: ["Explain it more simply", "Show another example", "Give me a problem to try", "Make it harder"],
 };
-function chatHTML(msgs) {
+function chatHTML(msgs, photo = true) {
   const last = msgs[msgs.length - 1];
   return msgs.map(m => m.role === "user"
     ? `<div class="msg user">${esc(m.text)}${m.hadImage ? `<div class="att">${icon("camera")}Photo attached</div>` : ""}</div>`
     : `<div class="msg model md">${msgBodyHTML(m)}${
         m.checked || m.card ? `<div class="msg-notes">${m.checked ? `<span>${icon("check")}Double-checked</span>` : ""}${m.card ? `<span>${icon("cards")}Your mistake was saved as a flashcard</span>` : ""}</div>` : ""}</div>${
-        m === last ? `<div class="chips follow">${(m.problem ? FOLLOW_UPS.problem : FOLLOW_UPS.explain).map(q => `<button class="chip" type="button">${q}</button>`).join("")}<button class="chip" type="button" data-photo>${icon("camera")}Check my solution (photo)</button></div>` : ""}`).join("");
+        m === last ? `<div class="chips follow">${(m.problem ? FOLLOW_UPS.problem : FOLLOW_UPS.explain).map(q => `<button class="chip" type="button">${q}</button>`).join("")}${photo ? `<button class="chip" type="button" data-photo>${icon("camera")}Check my solution (photo)</button>` : ""}</div>` : ""}`).join("");
 }
 const modelMsg = r => ({ role: "model", text: r.answer, figures: r.figures || (r.figure ? [r.figure] : []), problem: !!r.problem, checked: !!r.checked, card: !!r.card_added });
 /* the tutor's text with its figures drawn where it put [[FIG n]]; any figure it didn't place goes at the end */
@@ -488,9 +488,14 @@ function paneTutor(t) {
     send.disabled = true;
     try {
       msgs.push(modelMsg(await api("/api/chat", { topic: t.id, messages: msgs.map(m => ({ role: m.role, text: m.text, image: m.image })) })));
-    } catch (e) { const last = msgs.pop(); input.value = last.text; toast(e.message); }
-    send.disabled = false; draw();
+    } catch (e) {
+      const last = msgs.pop(); input.value = last.image && last.text === CHECK_PHOTO ? "" : last.text; toast(e.message);
+      if (last.image && chat.isConnected) { image = last.image; const a = $("#attach"); a.hidden = false; a.innerHTML = `${icon("camera")}${esc(image.name)} will be sent with your message`; }
+    }
+    send.disabled = false;
     store.set(key, msgs.map(({ image, ...m }) => m).slice(-40));
+    if (!chat.isConnected) return;               // the student moved to another tab meanwhile: the answer is saved
+    draw();
     const lastModel = $$(".msg.model", chat).pop(); lastModel?.scrollIntoView({ block: "start", behavior: "smooth" });
   };
   draw();
@@ -509,7 +514,7 @@ function paneTutor(t) {
     if (sendPhotoNow && image) go(input.value);
     sendPhotoNow = false;
   };
-  $("#clear").onclick = () => { msgs = []; store.set(key, []); draw(); };
+  $("#clear").onclick = () => { if (send.disabled) return; msgs = []; store.set(key, []); draw(); };
 }
 
 function panePractice(t) {
@@ -639,7 +644,11 @@ async function paneFiles(t) {
     <p class="muted small" style="margin-bottom:16px">${plural(files.length, "file")} from the portal${scanned ? `. ${scanned} ${scanned === 1 ? "is a scan" : "are scans"} without text, so the AI can't read ${scanned === 1 ? "it" : "them"}` : ""}. Files open right here; Word worksheets can be filled in.</p>
     <div id="fs-list">${all()}</div>`;
   const list = $("#fs-list"), note = $("#fs-note");
-  const mark = (text, words) => words.reduce((h, w) => h.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>"), esc(text));
+  const mark = (text, words) => {                // one pass over the raw text, so a word like "mark" never matches inside an earlier <mark>
+    const ws = (words || []).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    if (!ws.length) return esc(text);
+    return String(text).split(new RegExp(`(${ws.join("|")})`, "gi")).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("");
+  };
   let timer, seq = 0;
   $("#fs-q").addEventListener("input", e => {
     clearTimeout(timer);
@@ -667,7 +676,9 @@ async function renderReview(topic) {
   setNav("review", "Flashcards");
   view.innerHTML = `<div class="page-head"><div><h1>Flashcards</h1><p class="sub">${t ? `Due cards for ${esc(t.name)}.` : "Every card that's due today, across all subjects."} Press Space to turn a card, then 1 to 4 to grade it.</p></div></div><div class="review-wrap" id="rev"></div>`;
   let cards = [];
+  const me = current;
   try { ({ cards } = await api("/api/cards/due", topic ? { topic } : {})); } catch (e) { toast(e.message); }
+  if (current !== me) return;                    // the student went to another page meanwhile
   for (let i = cards.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [cards[i], cards[j]] = [cards[j], cards[i]]; }
   const total = cards.length;
   let i = 0, shown = false, done = 0, again = 0;
@@ -692,11 +703,15 @@ async function renderReview(topic) {
         `<button class="btn ${g === 4 ? "primary" : ""}" data-g="${g}" title="${d}">${l}<small>Key ${k}</small></button>`).join("")}</div>` : ""}`;
     if (!shown) $("#flip").focus({ preventScroll: true });
   };
+  let grading = false;
   const grade = async g => {
+    if (grading || i >= cards.length) return;    // a double click or key repeat must not grade the next, unseen card
+    grading = true;
     const c = cards[i]; i++; shown = false;
     if (g === 0) { cards.push(c); again++; } else done++;
     try { await api("/api/cards/review", { id: c.id, grade: g }); } catch (e) { toast(e.message); }
-    draw();
+    grading = false;
+    if (box.isConnected) draw();
   };
   box.onclick = e => { if (e.target.closest("#flip") && !shown) { shown = true; draw(); } const b = e.target.closest("[data-g]"); if (b) grade(+b.dataset.g); };
   current.keys = e => {
@@ -714,7 +729,9 @@ async function renderProfile() {
   setNav("profile", "Profile");
   view.innerHTML = `<div class="page-head"><div><h1>${S.name ? esc(S.name) : "Your progress"}</h1><p class="sub">Loading statistics</p></div></div>`;
   let st;
-  try { st = await api("/api/stats"); } catch (e) { view.innerHTML += `<div class="rows empty"><h3>Couldn't load statistics</h3><p>${esc(e.message)}</p></div>`; return; }
+  const me = current;
+  try { st = await api("/api/stats"); } catch (e) { if (current !== me) return; view.innerHTML += `<div class="rows empty"><h3>Couldn't load statistics</h3><p>${esc(e.message)}</p></div>`; return; }
+  if (current !== me) return;                    // the student went to another page meanwhile
   const a = st.activity, p = st.practice, c = st.cards;
   const since = a.first_day ? `Tracking since ${fmtDay(a.first_day, { day: "numeric", month: "long" })}: ${plural(a.active_days, "active day")}.` : "Nothing tracked yet. Statistics fill in as you use the tutor, practice questions and flashcards.";
   const kpi = (ic, v, unit, k) => `<div class="kpi"><div class="v">${v}${unit ? `<small>${unit}</small>` : ""}</div><div class="k">${icon(ic)}${k}</div></div>`;
@@ -842,7 +859,7 @@ function trendHTML(trend) {
   const grid = [0, 50, 100].map(v => `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" /><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}%</text>`).join("");
   const path = trend.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(d.pct).toFixed(1)}`).join(" ");
   const pts = trend.map((d, i) => `<circle cx="${x(i)}" cy="${y(d.pct)}" r="5" fill="${subjColor(d.subject)}" stroke="var(--surface)" stroke-width="2" tabindex="0"
-      data-tip="<b>${d.pct}%</b> ${esc(d.topic)}<br>${esc(SHORT[d.subject])}, ${fmtDay(d.date)}" />`).join("");
+      data-tip="<b>${d.pct}%</b> ${esc(esc(d.topic))}<br>${esc(esc(SHORT[d.subject]))}, ${fmtDay(d.date)}" />`).join("");
   const subs = [...new Set(trend.map(d => d.subject))];
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Score of each marked answer over time">${grid}
     <path d="${path}" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-linejoin="round" />${pts}
@@ -940,13 +957,13 @@ function renderSettings() {
     try { const r = await api("/api/settings", { key: k }); await refresh(); renderSettings(); const m = $("#keymsg"); m.style.color = "var(--green)"; m.textContent = `Key saved and working. Using ${r.model}.`; }
     catch (err) { msg.style.color = "var(--red)"; msg.textContent = err.message; busy(b, false); }
   };
-  $("#savemodel").onclick = async () => { await api("/api/settings", { model: $("#model").value }); await refresh(); toast("Model saved"); };
-  $("#savename").onclick = async () => { await api("/api/settings", { name: $("#name").value }); await refresh(); toast("Name saved"); };
+  $("#savemodel").onclick = async () => { try { await api("/api/settings", { model: $("#model").value }); await refresh(); toast("Model saved"); } catch (err) { toast(err.message); } };
+  $("#savename").onclick = async () => { try { await api("/api/settings", { name: $("#name").value }); await refresh(); toast("Name saved"); } catch (err) { toast(err.message); } };
   $("#addexam").onclick = () => $("#exams").insertAdjacentHTML("beforeend", examRow({ subject: "", name: "", date: S.today }));
   $("#exams").onclick = e => { if (e.target.closest(".rm")) e.target.closest(".exam-row").remove(); };
   $("#saveexams").onclick = async () => {
     const exams = $$(".exam-row").map(r => ({ subject: $(".es", r).value, name: $(".en", r).value.trim(), date: $(".ed", r).value }));
-    await api("/api/settings", { exams }); await refresh(); toast("Exam dates saved");
+    try { await api("/api/settings", { exams }); await refresh(); toast("Exam dates saved"); } catch (err) { toast(err.message); }
   };
   $$("[data-theme]", view).forEach(b => b.onclick = () => { store.set("theme", b.dataset.theme); applyTheme(); renderSettings(); });
 }
@@ -1000,7 +1017,7 @@ const asEl = $("#assistant"), asBody = $("#as-body"), asInput = $("#as-input");
 function asDraw() {
   const t = current.topic ? topicById(current.topic) : null;
   $("#as-context").innerHTML = t ? `${icon("file")}Also reading your ${esc(t.name)} files` : "";
-  asBody.innerHTML = AS.msgs.length ? chatHTML(AS.msgs) : `
+  asBody.innerHTML = AS.msgs.length ? chatHTML(AS.msgs, false) : `
     <div class="chat-empty"><h3>What can I help with?</h3>
     <p class="muted small" style="margin-bottom:14px">I can see your topics, exam dates, confidence ratings, practice marks and flashcards.</p>
     <div class="chips" style="flex-direction:column;align-items:stretch">${["What should I study today?", "Make me a revision plan until my exams", "Which topics am I weakest in?",
@@ -1029,7 +1046,7 @@ async function asSend(text) {
 $("#open-assistant").onclick = () => asToggle();
 $("#as-close").onclick = () => asToggle(false);
 $("#scrim").onclick = () => asToggle(false);
-$("#as-clear").onclick = () => { AS.msgs = []; store.set("assistant:chat", []); asDraw(); asInput.focus(); };
+$("#as-clear").onclick = () => { if ($("#as-send").disabled) return; AS.msgs = []; store.set("assistant:chat", []); asDraw(); asInput.focus(); };
 $("#as-form").onsubmit = e => { e.preventDefault(); asSend(asInput.value); };
 asInput.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); asSend(asInput.value); } };
 asInput.oninput = () => { asInput.style.height = "auto"; asInput.style.height = Math.min(asInput.scrollHeight, 180) + "px"; };
@@ -1093,6 +1110,7 @@ async function route() {
 }
 function navKeyFor(page, a) {
   if (page === "subject") return ["subject:" + a, a];
+  if (page === "week") return ["program", a ? `Week ${a}` : "Programme"];
   if (page === "topic" || page === "learn") { const t = topicById(a); return t ? ["subject:" + t.subject, t.name] : ["today", "Today"]; }
   const titles = { progress: "Progress", program: "Programme", files: "Files check", timetable: "Timetable", subjects: "Subjects", review: "Flashcards", profile: "Profile", settings: "Settings" };
   return [titles[page] ? page : "today", titles[page] || "Today"];

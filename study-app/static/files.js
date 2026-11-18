@@ -11,7 +11,11 @@ const fileFolder = p => p.split("/").slice(1, -1).map(x => x.replace(/^\d+\s+/, 
 
 /* File search: by name or by words inside. scope is {topic}, {subject} or {} for every file.
    While there's a query the results replace the page body; idle(true) puts the normal content back. */
-const markWords = (text, words) => words.reduce((h, w) => h.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>"), esc(text));
+const markWords = (text, words) => {          // one pass over the raw text, so a word like "mark" never matches inside an earlier <mark>
+  const ws = (words || []).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!ws.length) return esc(text);
+  return String(text).split(new RegExp(`(${ws.join("|")})`, "gi")).map((p, i) => i % 2 ? `<mark>${esc(p)}</mark>` : esc(p)).join("");
+};
 const topicLabel = id => id === "general" ? "Whole subject" : (topicById(id)?.name || "No topic");
 const fileSearchHTML = (id, placeholder) => `<div class="file-search"><label class="sr" for="${id}">${esc(placeholder)}</label>
   <input type="search" id="${id}" placeholder="${esc(placeholder)}" autocomplete="off"><span class="muted small" id="${id}-note"></span></div>`;

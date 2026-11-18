@@ -667,8 +667,8 @@
           "topics": [
             "c-period"
           ],
-          "focus": "Periodicity",
-          "guess": true
+          "focus": "Periodicity and trends across the periodic table",
+          "assessment": "coursework"
         },
         {
           "week": 10,

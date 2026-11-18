@@ -282,12 +282,15 @@ def topic_files(tid, shared=True):
 def topic_material(tid, limit=MAX_CONTEXT_CHARS):
     parts, total = [], 0
     for f in topic_files(tid):
-        text = re.sub(r"\n{3,}", "\n\n", (TEXT / f).read_text(errors="ignore")).strip()
+        try:
+            text = re.sub(r"\n{3,}", "\n\n", (TEXT / f).read_text(errors="ignore")).strip()
+        except OSError:                   # removed by a sync since the file list was read
+            continue
         if len(text) < 40:
             continue
         chunk = f"\n\n===== FILE: {f.rsplit('/', 1)[-1].removesuffix('.txt')} =====\n{text}"
         if total + len(chunk) > limit:
-            break
+            continue                      # too big to fit: the smaller files after it still can
         parts.append(chunk)
         total += len(chunk)
     return "".join(parts)
@@ -532,7 +535,7 @@ def _gemini(contents, system=None, schema=None, temperature=0.6, think=True):
                 del body["generationConfig"]["thinkingConfig"]      # this model can't think: go on without it
                 _model_cache["thinking"] = False
                 return _gemini(contents, system, schema, temperature, think=False)
-            if e.code in (429, 500, 503, 504):   # busy or over quota: try the next model
+            if e.code in (404, 429, 500, 503, 504):   # retired model, busy or over quota: try the next model
                 last_err = ("You've hit Gemini's free-tier limit. Wait a minute (or until tomorrow for the daily limit) "
                             "and try again.") if e.code == 429 else f"Gemini is busy right now ({e.code}). Try again in a minute."
                 continue
@@ -605,7 +608,7 @@ def figure_rules(tid):
 def system_for(tid, extra=""):
     material = topic_material(tid)
     src = ("There are no lesson files for this topic yet (it may not have been taught). "
-           "Use the standard UK A-level / foundation-year syllabus and say so once.") if not TOPICS[tid]["sources"] else ""
+           "Use the standard UK A-level / foundation-year syllabus and say so once.") if not material else ""
     if material:
         src += ("\nHere are the student's own course materials. Base your teaching on them, follow their notation "
                 "and methods, and when you use a file mention its name in [square brackets].\n" + material)
@@ -626,9 +629,10 @@ def record_study(p, tid, score=None, max_marks=None):
     t["last"] = today()
     if score is not None and max_marks:
         pct = max(0.0, min(1.0, score / max_marks))
-        t["history"].append({"date": t["last"], "score": score, "max": max_marks})
+        t["history"].append({"date": t["last"], "score": max(0, min(max_marks, score)), "max": max_marks})
         old = t.get("confidence", 0)
-        t["confidence"] = round(pct * 5, 1) if not old else round(0.7 * old + 0.3 * pct * 5, 1)
+        first = not old and len(t["history"]) == 1           # 0 after earlier 0% answers is a rating, not "none yet"
+        t["confidence"] = round(pct * 5, 1) if first else round(0.7 * old + 0.3 * pct * 5, 1)
 
 
 def review_card(card, grade):
@@ -1003,7 +1007,7 @@ TUTOR_RULES_WRITTEN = (
 
 def tidy_math(text):
     """Repair the LaTeX delimiters the model sometimes gets wrong, so formulas always render."""
-    text = re.sub(r"\$[|\]]", "$$", text)                       # "$|" typed instead of "$$"
+    text = re.sub(r"\$(?:\]|\|(?![^$\n]*\|))", "$$", text)       # "$|" typed instead of "$$" (not "$|x|$", a modulus)
     for ch, letter in (("\t", "t"), ("\f", "f"), ("\r", "r"), ("\b", "b")):   # "\text" sent as TAB + "ext", etc.
         text = re.sub(re.escape(ch) + r"(?=[a-z])", lambda m: "\\" + letter, text)
     out = []
@@ -1065,7 +1069,8 @@ def tutor_reply(tid, messages, system):
     m = r.get("mistake") or {}
     if m.get("found") and "Back:" in str(m.get("front", "")):     # both sides landed in one field: take the last pair
         tail = str(m["front"]).rsplit("Front:", 1)[-1]
-        m["front"], m["back"] = (x.strip() for x in tail.split("Back:", 1))
+        if "Back:" in tail:                    # "Back: ... Front: ..." has no pair after the last Front: keep the card as is
+            m["front"], m["back"] = (x.strip() for x in tail.split("Back:", 1))
     if m.get("found") and m.get("front") and m.get("back"):
         with LOCK:
             cards = load("cards.json", [])
@@ -1367,6 +1372,10 @@ PLAN_SCHEMA = {"type": "object", "properties": {"weeks": {"type": "array", "item
     "required": ["weeks"]}
 
 
+WEEK_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+              "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+
+
 def file_week(path):
     """Teaching week a course file belongs to, from its folders or name ("Week 9", "Week 1.10", "W9L2"), or None."""
     low = path.lower()
@@ -1376,6 +1385,8 @@ def file_week(path):
     m = re.search(r"\bweek\s*0?\d\.(\d{1,2})\b", low) or re.search(r"\bweek\s*0?(\d{1,2})\b", low) or \
         re.search(r"\bw(\d{1,2})\s*l\s*\d", low) or re.search(r"\bwk\s*0?(\d{1,2})\b", low)
     n = int(m.group(1)) if m else None
+    if not m and (m := re.search(r"\bweek\s+(" + "|".join(WEEK_WORDS) + r")(?![\w-])", low)):   # "Week Six"
+        n = WEEK_WORDS.index(m.group(1)) + 1
     return n if n and 1 <= n <= 40 else None
 
 
@@ -1414,7 +1425,7 @@ def plan_refresh():
                     None, PLAN_SCHEMA, 0.1, think=False)
             except GeminiError as e:
                 print("plan refresh:", e)
-                return
+                break                            # weeks already added for earlier subjects still get their files re-sorted
             with LOCK:
                 cfg = json.loads(TOPICS_FILE.read_text())
                 write_atomic(DATA / "topics.before-update.json", json.dumps(cfg, ensure_ascii=False, indent=2))   # the last version, just in case
@@ -1515,7 +1526,7 @@ def api_week(b):
 def api_topic_search(b):
     """Find a file by its name or by words in its text (all words must be there).
     Searches one topic ("topic"), one subject ("subject") or every file (neither)."""
-    words = [w for w in re.findall(r"\w+", str(b.get("q", "")).lower()) if len(w) > 1][:6]
+    words = [w for w in re.findall(r"\w+", str(b.get("q", "")).lower()) if len(w) > 1 or w.isdigit()][:6]   # "Week 9", "Paper 1"
     out = []
     if not words:
         return {"results": out}
@@ -1632,12 +1643,15 @@ def sub_material(tid, sub, limit=350_000):
     first = [f for f in files if any(w in f.lower() for w in wanted)]
     parts, total = [], 0
     for f in first + [f for f in files if f not in first]:
-        text = re.sub(r"\n{3,}", "\n\n", (TEXT / f).read_text(errors="ignore")).strip()
+        try:
+            text = re.sub(r"\n{3,}", "\n\n", (TEXT / f).read_text(errors="ignore")).strip()
+        except OSError:                   # removed by a sync since the file list was read
+            continue
         if len(text) < 40:
             continue
         chunk = f"\n\n===== FILE: {f.rsplit('/', 1)[-1].removesuffix('.txt')} =====\n{text}"
         if total + len(chunk) > limit:
-            break
+            continue                      # too big to fit: the smaller files after it still can
         parts.append(chunk)
         total += len(chunk)
     return "".join(parts)
@@ -1645,7 +1659,7 @@ def sub_material(tid, sub, limit=350_000):
 
 def learn_system(tid, sub=None, extra=""):
     material = sub_material(tid, sub) if sub else topic_material(tid, 350_000)
-    no_lessons = "" if TOPICS[tid]["sources"] else (
+    no_lessons = "" if material else (
         "There are no lesson files for this topic yet (it may not have been taught). Use the standard UK A-level / "
         "NCUK foundation-year syllabus.\n")
     focus = (f"\nCurrent subtopic: {sub['title']}. Summary: {sub.get('summary', '')}. "
@@ -1746,6 +1760,8 @@ def make_lesson(tid, sub):
         check = clean_mcqs([s["check"]])
         if check:
             steps.append({**with_figures([s])[0], "check": check[0]})
+    if not steps:                              # an empty lesson would be cached and shown as 0 steps
+        raise GeminiError("Gemini didn't return a usable lesson. Try again.")
     return {"intro": out.get("intro", ""), "steps": steps, "summary": out.get("summary", "")}
 
 
@@ -1987,7 +2003,7 @@ def api_handoff(b):
         seen_text.add(h)
         chunk = f"\n\n===== FILE: {f.rsplit('/', 1)[-1].removesuffix('.txt')} =====\n{text}"
         if total + len(chunk) > PACK_TEXT_LIMIT:
-            break
+            continue                # too big to fit: the smaller files after it still can
         parts.append(chunk)
         total += len(chunk)
     notes_name = "00 Course notes (text of all files).txt"
@@ -2217,7 +2233,7 @@ def auto_sync_loop():
             chosen = CONFIG.get("intostudy_courses") or load("courses.json", {})   # a new install: after the guide
             # signed out: try quietly again twice a day (Microsoft usually remembers this browser), never in a loop
             stale = st.get("state") == "login" and (st.get("finished") or "") < (datetime.now() - timedelta(hours=12)).isoformat()
-            if VENV_PY.exists() and chosen and due and (st.get("state") not in ("login", "login_window", "choose") or stale) \
+            if VENV_PY.exists() and chosen and due and (st.get("state") not in ("login", "choose") or stale) \
                     and not sync_running():
                 start_sync()
         except Exception as e:
@@ -2367,18 +2383,19 @@ def api_program(_):
         week_of_topic = {}
         for w in sub.get("plan", []):
             for tid in w["topics"]:
-                week_of_topic.setdefault(tid, w["week"])
+                week_of_topic.setdefault(tid, []).append(w["week"])
         c = compass.get(name)
         c = c if c and cur and c.get("week") == cur else None
-        now = (c["topics"] if c else plan.get(cur, {}).get("topics", [])) if cur else []
+        now = (c["topics"] if c and c.get("topics") else plan.get(cur, {}).get("topics", [])) if cur else []
         nxt = (c.get("next_topics") if c and c.get("next_topics") else
                plan.get(cur + 1, {}).get("topics", [])) if cur else []
+        now, nxt = [t for t in now if t in TOPICS], [t for t in nxt if t in TOPICS]   # ids from before a plan refresh
         fresh_here = [t for t in fresh if TOPICS[t]["subject"] == name]
         # are the newest uploads ahead of or behind the plan?
         fw = [week_of_topic[t] for t in edited if t in week_of_topic]
         pace = None
         if cur and fw and plan:
-            pace = "ahead" if max(fw) > cur else "behind" if max(fw) < cur - 1 else "on plan"
+            pace = "ahead" if max(min(w) for w in fw) > cur else "behind" if max(max(w) for w in fw) < cur - 1 else "on plan"
         # did the teacher replace the plan file after Study Desk first downloaded it?
         changed = max((x["date"][:10] for x in load("sync_log.json", []) if x.get("kind") == "updated"
                        and x.get("path") == sub.get("plan_file")), default=None)
@@ -2411,6 +2428,8 @@ def api_compass(b):
     text, image = (b.get("text") or "").strip(), b.get("image")
     if not text and not (image and image.get("data")):
         raise ValueError("Paste the text from Compass or add a screenshot.")
+    if "term" not in CONFIG:
+        raise ValueError("Build your programme first, then add Compass.")
     cur = week_of(date.today())
     topics = "\n".join(f"{tid}: {t['subject']}: {t['name']}" for tid, t in TOPICS.items())
     plans = json.dumps({n: s.get("plan", []) for n, s in CONFIG["subjects"].items()}, ensure_ascii=False)
@@ -2422,6 +2441,8 @@ def api_compass(b):
               f"summary: one short sentence on what this week is about. items: the lessons, homework, tests and "
               f"deadlines it lists, each a short line with its day or date if given. lessons: one per class day it lists, weekday 1 = Monday ... 5 = Friday, the topic id taught that day and what is covered (short). assessments: every quiz, test, assessment or homework deadline it gives a day or date for, date as YYYY-MM-DD. todo: each thing the teacher asks the student to DO (complete a homework, read, bring, prepare), one short line each, keeping names like Hwk10; empty if none.\n\nCOMPASS TEXT:\n{text or '(see the screenshot)'}")
     r = gemini([{"role": "user", "parts": user_parts(prompt, image)}], schema=COMPASS_SCHEMA, temperature=0.2, think=False)
+    if b.get("subject") in CONFIG["subjects"]:      # a class feed: the subject is known, not guessed
+        r["subject"] = b["subject"]
     if r.get("subject") not in CONFIG["subjects"]:
         raise ValueError("Couldn't tell which subject this is. Paste a bit more of the page.")
     ok = lambda ids: [t for t in ids or [] if t in TOPICS and TOPICS[t]["subject"] == r["subject"]]
@@ -2436,8 +2457,9 @@ def api_compass(b):
              "text": text[:5000]}
     with LOCK:
         c = load("compass.json", {})
-        c[r["subject"]] = entry
-        save("compass.json", c)
+        if entry["topics"] or entry["lessons"] or entry["assessments"] or not c.get(r["subject"]):
+            c[r["subject"]] = entry                 # a post with nothing in it (bring a lab coat) keeps the saved week
+            save("compass.json", c)
     todo = [] if b.get("no_tasks") else [str(x).strip() for x in r.get("todo") or [] if str(x).strip()][:8]
     added = add_tasks("\n".join(todo), "compass", r["subject"]) if todo else []
     return {"subject": r["subject"], **entry, "tasks_added": [t["text"] for t in added]}
@@ -2590,7 +2612,8 @@ def api_timetable_image(b):
         f"day 1=Monday..5=Friday, start/end HH:MM (24 h), subject = the closest of {json.dumps(subjects, ensure_ascii=False)} "
         "(skip anything that is none of them), plus course code, room and teacher if shown.", image)}],
         None, TIMETABLE_SCHEMA, 0.0)
-    tt = [{k: str(c.get(k, "")) if k != "day" else int(c["day"]) for k in ("day", "start", "end", "subject", "code", "room", "teacher")}
+    tt = [{k: str(c.get(k) or "").zfill(5 if k in ("start", "end") else 0) if k != "day" else int(c["day"])
+           for k in ("day", "start", "end", "subject", "code", "room", "teacher")}
           for c in r.get("timetable", []) if c.get("subject") in subjects and 1 <= int(c.get("day") or 0) <= 7
           and re.fullmatch(r"\d{1,2}:\d{2}", str(c.get("start", ""))) and re.fullmatch(r"\d{1,2}:\d{2}", str(c.get("end", "")))]
     if not tt:
@@ -2727,7 +2750,8 @@ def onedrive_map():
     ask = []
     for r in todo:
         low = r["path"].lower()
-        hit = [n for n in subjects if n.lower() in low or (CONFIG["subjects"][n].get("short") or "~").lower() in low]
+        word = lambda w: bool(w) and re.search(r"\b" + re.escape(w.lower()) + r"\b", low)   # "bus" is not in "syllabus"
+        hit = [n for n in subjects if word(n) or word(CONFIG["subjects"][n].get("short"))]
         if len(hit) == 1:
             mapping[r["path"]] = hit[0]
         else:
@@ -2751,9 +2775,12 @@ def onedrive_map():
 
 def onedrive_cycle(full=True):
     """Find what is shared, link it to subjects, download what is new; then sort and announce the new files."""
-    if ONEDRIVE["busy"] or not VENV_PY.exists():
+    if not VENV_PY.exists():
         return
-    ONEDRIVE["busy"] = True
+    with SYNC_START:                              # same lock as start_sync: never two browsers on one profile
+        if ONEDRIVE["busy"] or sync_running():
+            return
+        ONEDRIVE["busy"] = True
     try:
         if full or not load("onedrive_found.json", {}):
             if onedrive_run("list") or load("onedrive_status.json", {}).get("state") == "login":
@@ -2773,6 +2800,8 @@ def onedrive_cycle(full=True):
 def onedrive_soon():
     """Shortly after start (also right after an update): OneDrive for anyone who already picked their courses."""
     time.sleep(90)
+    if CATCHUP.is_set():                          # the first start of a new version checks OneDrive after IntoStudy
+        return
     while sync_running():
         time.sleep(30)
     if CONFIG["subjects"] and (CONFIG.get("intostudy_courses") or load("courses.json", {})) \
@@ -2870,8 +2899,28 @@ def _event_name(e):
     return str(e.get("subjectLongName") or e.get("title") or e.get("longTitleWithoutTime") or "").strip()
 
 
-def compass_timetable(events):
+def teacher_name(m, people):
+    """A teacher's name: from their own posts if they wrote one, else from the Compass id ("jdoe" -> "J. Doe")."""
+    known = people.get(str(m.get("managerUserId") or ""))
+    if known:
+        return known
+    code = str(m.get("managerImportIdentifier") or "").strip()
+    return f"{code[0].upper()}. {code[1:].capitalize()}" if re.fullmatch(r"[a-z]{3,}", code) else code
+
+
+def compass_people(raw, known=None):
+    """User id -> name of everyone who posted (the home feed and each class feed), added to what we knew."""
+    people = dict(known or {})
+    for block in [raw.get("news")] + list((raw.get("class_news") or {}).values()):
+        for n in _rows(block):
+            if n.get("UserId") and str(n.get("UserName") or "").strip():
+                people[str(n["UserId"])] = str(n["UserName"]).strip()
+    return people
+
+
+def compass_timetable(events, people=None):
     """One typical teaching week of classes from the calendar (the first week that has classes)."""
+    people = people or {}
     rows = []
     for e in events:
         st, fi = _ts(e.get("start")), _ts(e.get("finish"))
@@ -2881,6 +2930,9 @@ def compass_timetable(events):
     if not rows:
         return []
     names = compass_subjects([_event_name(e) for _, _, e in rows])
+    rows = [r for r in rows if names.get(_event_name(r[2]))]   # the first week with classes, not with an assembly
+    if not rows:
+        return []
     first = min(st for st, _, _ in rows)
     monday = (first - timedelta(days=first.weekday())).date()
     out, seen = [], set()
@@ -2897,7 +2949,7 @@ def compass_timetable(events):
         parts = [x.strip() for x in str(e.get("longTitleWithoutTime") or "").split(" - ")]
         room = ", ".join(l.get("locationName", "") for l in e.get("locations") or [] if l.get("locationName")) or \
             (parts[2] if len(parts) > 2 else "")
-        teacher = ", ".join(str(m.get("managerImportIdentifier") or "") for m in e.get("managers") or []
+        teacher = ", ".join(teacher_name(m, people) for m in e.get("managers") or []
                             if m.get("managerImportIdentifier")) or (parts[3] if len(parts) > 3 else "")
         out.append({"day": st.isoweekday(), "start": st.strftime("%H:%M"), "end": fi.strftime("%H:%M"), "subject": subj,
                     "code": str(e.get("title") or (parts[1] if len(parts) > 1 else "")), "room": room, "teacher": teacher})
@@ -2918,8 +2970,10 @@ def compass_apply():
         return                                  # nothing read yet, or no programme yet (setup runs this again)
     auto = load("compass_auto.json", {})
     # 1. timetable
-    tt = compass_timetable(_rows(raw.get("calendar")))
-    if tt and auto.get("timetable") and tt != auto["timetable"]:
+    auto["people"] = compass_people(raw, auto.get("people"))
+    tt = compass_timetable(_rows(raw.get("calendar")), auto["people"])
+    slots = lambda t: [(c["day"], c["start"], c["end"], c["subject"], c["room"]) for c in t or []]   # names don't count
+    if tt and auto.get("timetable") and slots(tt) != slots(auto["timetable"]):
         notify([{"id": f"timetable:{datetime.now():%Y%m%d%H%M}", "kind": "timetable", "link": "#/timetable",
                  "title": "Your timetable changed in Compass", "text": "Open Timetable to see this week's classes."}])
     if tt:
@@ -2957,9 +3011,11 @@ def compass_apply():
         notify([{"id": f"task:{t['text']}:{t['due']}", "kind": "task", "subject": t["subject"], "link": "#/today",
                  "title": f"{SHORT_SUBJECT.get(t['subject'], t['subject']) + ': ' if t['subject'] else ''}new task in Compass",
                  "text": f"{t['text']} (due {t['due']})"} for t in new])
-    auto["task_ids"] = sorted(seen)[-500:]
+    old = auto.get("task_ids", [])               # oldest first, so the cut drops the oldest (not by string order)
+    auto["task_ids"] = (old + sorted(seen - set(old)))[-500:]
     auto["tasks_added"] = auto.get("tasks_added", 0) + len(new)
-    auto["assessments"] = ass
+    if (raw.get("tasks") or {}).get("status") == 200:   # a failed read of tasks keeps the dates we had
+        auto["assessments"] = ass
     # 3. class news from the last three weeks: which topics this week, homework, test dates (one AI read each)
     read = set(auto.get("news_ids", []))
     cutoff = datetime.now() - timedelta(days=21)
@@ -2969,7 +3025,7 @@ def compass_apply():
     for aid, block in (raw.get("class_news") or {}).items():        # each class's own feed; a teacher's post often
         for n in _rows(block)[:20]:                                   # shows on the home feed too: the class copy wins
             found[nid_of(n)] = (classes.get(str(aid), ""), n)
-    posts = sorted(found.values(), key=lambda x: str(x[1].get("PostDateTime") or ""))   # oldest first: newest wins
+    posts = sorted(found.values(), key=lambda x: _ts(x[1].get("PostDateTime") or x[1].get("postDateTime")) or datetime.min)   # oldest first: newest wins
     done_now = 0
     for cls, n in posts:
         nid = str(n.get("NewsItemId") or n.get("newsItemId") or n.get("Id") or "")
@@ -2985,21 +3041,25 @@ def compass_apply():
                  "kind": "post" if cls else "news", "subject": subj, "link": "#/program" if cls else "#/today",
                  "title": (f"{who} posted in {SHORT_SUBJECT.get(subj, subj or cls)}" if cls else f"{who or 'Compass'}: school news"),
                  "text": (title or body.strip().split("\n")[0])[:160]}])
-        if not cls:
-            continue                            # school-wide news: only a notification, not a subject's plan
+        if not subj:
+            continue                            # school-wide news, tutorial, assembly: only a notification
         text = "\n".join(x for x in (f"Class news: {cls}", title, f"from {who}" if who else "",
                                      f"posted {when:%A %d %B %Y}" if when else "", body) if x)
         if len(text) < 40:
             continue
         try:                                    # homework only from posts of the last 8 days; older ones are history
-            r = api_compass({"text": text[:6000], "no_tasks": bool(when and when < datetime.now() - timedelta(days=8))})
+            r = api_compass({"text": text[:6000], "subject": subj,
+                             "no_tasks": bool(when and when < datetime.now() - timedelta(days=8))})
             auto["news_read"] = auto.get("news_read", 0) + 1
             notify([{"id": f"task:{x}", "kind": "task", "subject": r["subject"], "link": "#/today",
                      "title": f"{SHORT_SUBJECT.get(r['subject'], r['subject'])}: homework from {who or 'Compass'}", "text": x}
                     for x in r.get("tasks_added", [])])
         except Exception as e:                  # one odd post never stops the rest from being recorded
             print("compass post:", type(e).__name__, e)
-    auto["news_ids"] = sorted(read)[-500:]
+            if isinstance(e, GeminiError) or "term" not in CONFIG:
+                read.discard(nid)               # no key, no network, no programme yet: read it again next time
+    old = auto.get("news_ids", [])
+    auto["news_ids"] = ([x for x in old if x in read] + sorted(read - set(old)))[-500:]
     auto["applied"] = datetime.now().isoformat(timespec="seconds")
     save("compass_auto.json", auto)
 
@@ -3012,7 +3072,7 @@ def compass_loop():
             st = load("compass_status.json", {})
             last = st.get("last_ok") or ""
             due = not last or datetime.fromisoformat(last) < datetime.now() - timedelta(hours=COMPASS_EVERY_H)
-            if last and due and st.get("via") != "extension" and st.get("state") not in ("login", "login_window", "blocked") \
+            if last and due and st.get("via") != "extension" and st.get("state") not in ("login", "blocked") \
                     and not compass_running():
                 start_compass()
         except Exception as e:
@@ -3064,6 +3124,7 @@ def api_topic_mark(b):
             tp["last"] = today()
         else:
             tp.pop("studied", None)
+            tp.pop("last", None)                  # else topic_standing still counts it as studied
         save("progress.json", p)
         log_event("mark_studied" if b.get("studied", True) else "unmark_studied", tid)
         return topic_standing(p, tid)
@@ -3270,7 +3331,11 @@ def make_review(tid):
     except GeminiError:
         pass
     md = tidy_math(md.strip())
-    return {"md": md, "tg": make_tg(md), "made": today(), "files": review_sig(tid)}
+    try:
+        tg = make_tg(md)
+    except GeminiError:                  # keep the checked notes; the Telegram version is made when first asked for
+        tg = ""
+    return {"md": md, "tg": tg, "made": today(), "files": review_sig(tid)}
 
 
 def make_tg(md):
@@ -3415,11 +3480,21 @@ def add_tasks(text, source, subject=None):
     with LOCK:
         tasks = load("tasks.json", [])
         norm = lambda x: re.sub(r"\W+", " ", x.lower()).strip()
-        have = {norm(t["text"]) for t in tasks if not t.get("done") or t["done"] >= (date.today() - timedelta(days=14)).isoformat()}
+        keep = [t for t in tasks if not t.get("done") or t["done"] >= (date.today() - timedelta(days=14)).isoformat()]
+        if source in ("app", "telegram"):              # typed by hand: a task done days ago may be due again
+            keep = [t for t in keep if not t.get("done")]
+        have = {norm(t["text"]) for t in keep}
+        # the same homework written differently ("Доделать Hwk10" from Telegram, "Complete homework (Hwk10 ...)" from Compass)
+        hw = lambda x: {f"hwk{int(n)}" for n in re.findall(r"\b(?:hwk|hw|homework)\s*0*(\d{1,3})\b", x, re.I)}
+        hw_have = defaultdict(set)
+        for t in keep:
+            hw_have[t.get("subject") or ""] |= hw(t["text"])
         added = []
         for t in new:
-            if norm(t["text"]) in have:
+            codes = hw(t["text"])
+            if norm(t["text"]) in have or (codes and codes <= hw_have[t.get("subject") or ""]):
                 continue
+            hw_have[t.get("subject") or ""] |= codes
             t.update(id=uuid.uuid4().hex[:8], created=today(), done=None, source=source)
             tasks.append(t)
             added.append(t)
@@ -3483,7 +3558,8 @@ def match_tasks(q):
     if not tasks:
         return []
     low = str(q or "").lower()
-    if re.search(r"\b(все|всё|all)\b", low):
+    if re.fullmatch(r"(?:(?:я\s+)?(?:сделал|сделала|выполнил|выполнила|did|done|finished)\s+)?(?:все|всё|all)"
+                    r"(?:\s+(?:задачи|tasks))?(?:\s+(?:сделал|сделала|done))?[.!]*", low.strip()):    # only "всё" itself, not "все задачи по физике"
         return tasks
     listing = "\n".join(f"{t['id']}: {task_line(t)}" for t in tasks)
     try:
@@ -3502,8 +3578,9 @@ def remind_text():
     due = [t for t in open_tasks() if t.get("due") and t["due"] <= tmr.isoformat()]
     if not due:
         return ""
+    in_break = any(b["start"] <= tmr.isoformat() <= b["end"] for b in CONFIG.get("breaks", []))
     classes = {c["subject"]: c for c in sorted(CONFIG.get("timetable", []), key=lambda c: c["start"], reverse=True)
-               if c["day"] == tmr.isoweekday()}
+               if c["day"] == tmr.isoweekday() and not in_break}
     days = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
     L = [f"Напоминание на завтра ({days[tmr.weekday()]} {tmr.day}.{tmr.month:02d})"]
     for subj in list(classes) + [""]:
@@ -3576,7 +3653,7 @@ def api_agent(b):
     if act in ("review", "mark"):
         ids = find_topics(b.get("topic"))
         if len(ids) != 1:
-            names = [TOPICS[i]["name"] for i in ids] or [t["name"] for t in TOPICS.values()]
+            names = [f"{TOPICS[i]['subject']}: {TOPICS[i]['name']}" for i in ids] or [t["name"] for t in TOPICS.values()]
             return {"text": ("Уточни тему: " if ids else "Не понял, какая тема. Темы: ") + "; ".join(names)}
         tid = ids[0]
         label = f"{TOPICS[tid]['subject']}: {TOPICS[tid]['name']}"
@@ -3585,10 +3662,16 @@ def api_agent(b):
             return {"text": f"{label}: " + ("отмечена как изученная. Подтверди её проверкой в Study Desk."
                                              if st["status"] != "none" else "отметка снята.")}
         r = api_review({"topic": tid})                 # the first time this writes the notes (about a minute)
+        if r["md"] and not r["tg"]:                    # the notes exist but their Telegram version failed: make it now
+            r["tg"] = make_tg(r["md"])
+            with LOCK:
+                rv = review_load(tid)
+                rv["tg"] = r["tg"]
+                review_save(tid, rv)
         if not r["tg"]:
             return {"text": f"Конспект по теме «{label}» ещё пишется. Спроси ещё раз через минуту."}
         st = topic_standing(progress(), tid)
-        mine = f"\n\nТВОИ ЗАМЕТКИ\n{r['mine'][:1200]}" if r["mine"].strip() else ""
+        mine = f"\n\nТВОИ ЗАМЕТКИ\n{r['mine'][:max(0, min(1200, 3800 - len(r['tg'])))]}" if r["mine"].strip() else ""   # under Telegram's 4096
         return {"text": f"REVIEW · {label}\nСтатус: {topic_line({**st, 'name': TOPICS[tid]['name']}).split(': ', 1)[1]}\n\n{r['tg']}{mine}"}
     if act == "compass":
         r = api_compass({"text": b.get("text", "")})
@@ -4197,14 +4280,14 @@ def agy_signin_start():
                 time.sleep(0.4)
                 os.write(master, b"\r")          # 1. Google OAuth
                 picked = True
-            m = re.search(rb"\x1b\]8;[^;]*;(https://accounts\.google\.com/[^\x07\x1b]+)", raw)
+            m = re.search(rb"\x1b\]8;[^;]*;(https://accounts\.google\.com/[^\x07\x1b]+)(?:\x07|\x1b\\)", raw)   # whole link only
             if m:
                 AGY_SIGNIN["url"] = m.group(1).decode()
             text = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", b"", raw)
             text = re.sub(rb"\x1b\[[0-9;?>=]*[ -/]*[@-~]", b"", text).decode(errors="replace")
             AGY_SIGNIN["out"] = "\n".join(l.rstrip() for l in text.splitlines() if l.strip())[-1500:]
     threading.Thread(target=read, daemon=True).start()
-    threading.Timer(900, agy_signin_stop).start()    # give up after 15 minutes
+    threading.Timer(900, lambda: AGY_SIGNIN.get("proc") is proc and agy_signin_stop()).start()  # give up after 15 minutes (this sign-in only)
 
 
 def agy_signin_stop():
@@ -4254,8 +4337,15 @@ def api_setup_agy(b):
     if act == "terminal":                 # fallback: the ordinary sign-in in a Terminal window
         if not os.path.exists(AGY):
             raise ValueError("Install Antigravity first.")
-        subprocess.run(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (quoted form of item 1 of argv)',
-                        "-e", 'tell application "Terminal" to activate', "-e", "end run", AGY], timeout=20)
+        try:
+            r = subprocess.run(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (quoted form of item 1 of argv)',
+                                "-e", 'tell application "Terminal" to activate', "-e", "end run", AGY],
+                               capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            r = None
+        if not r or r.returncode:
+            raise ValueError("Couldn't open Terminal. Allow Study Desk to control Terminal in System Settings → "
+                             "Privacy & Security → Automation, then try again.")
         return {"ok": True}
     if act == "test":
         return {"answer": agy_call([{"role": "user", "parts": [{"text": "Reply with exactly: Study Desk is ready."}]}],
@@ -4352,6 +4442,41 @@ def api_setup_done(b):
         st["done"] = today()
         save("setup.json", st)
     return {"ok": True}
+
+
+CATCHUP = threading.Event()
+
+
+def after_update():
+    """The first start of a new version: check IntoStudy and then OneDrive at once, sort what is unsorted (and what
+    was sorted into a topic the programme no longer has) and add the weeks the new files show, with no button to press.
+    Safe to repeat: files already downloaded, sorted or looked at for a week are not done again."""
+    now = app_version()
+    if load("app_version.json", {}).get("version") == now:
+        return
+    if not (VENV_PY.exists() and CONFIG["subjects"] and (CONFIG.get("intostudy_courses") or load("courses.json", {}))):
+        return save("app_version.json", {"version": now})   # a new install: the setup guide runs the first sync
+    CATCHUP.set()
+    with LOCK:
+        smap, changed = sorted_map(), False
+        for f, e in list(smap.items()):
+            if e.get("by") == "ai" and e.get("topic") not in TOPICS and e.get("topic") != "general":
+                del smap[f]
+                changed = True
+            elif any(a not in TOPICS for a in e.get("also", [])):
+                e["also"] = [a for a in e["also"] if a in TOPICS]
+                changed = True
+        if changed:
+            save("file_topics.json", smap)
+    time.sleep(15)
+    for _ in range(120):                          # start the check, or count the one already running
+        if sync_running() or start_sync():
+            break
+        time.sleep(30)
+    while sync_running():
+        time.sleep(10)
+    if load("sync_status.json", {}).get("state") == "idle":   # signed out or offline: try again on the next start
+        save("app_version.json", {"version": now})
 
 
 # ---------- updates (Mac app only): replace the code, never the data ----------
@@ -4539,7 +4664,7 @@ button{font:inherit;font-weight:600;padding:13px;border-radius:12px;border:0;bac
 <input type="text" name="username" value="study-desk" autocomplete="username" hidden>
 <input id="pw" type="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required autofocus>
 <button>Sign in</button><p id="err" role="alert"></p></form>
-<script>document.getElementById("f").onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;
+<script>document.getElementById("f").onsubmit=async e=>{e.preventDefault();const b=e.submitter||e.target.querySelector("button");b.disabled=true;
 const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({password:document.getElementById("pw").value})}).catch(()=>null);
 if(r&&r.ok){location.replace("/");return}b.disabled=false;
@@ -4614,7 +4739,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send(302, b"", "text/plain", {"Location": "/login"})
             return True
-        if path in ("/api/class/chunk", "/api/class/upload") or ROUTES.get((method, path)) in MAC_ROUTES:
+        if path in ("/api/class/chunk", "/api/class/upload", "/file", "/work.docx") or ROUTES.get((method, path)) in MAC_ROUTES:
             self.send(503, {"error": MAC_ONLY.replace(" The phone version doesn't make anything new with AI.", "")})
             return True
         return False
@@ -4723,7 +4848,8 @@ if __name__ == "__main__":
     threading.Thread(target=compass_loop, daemon=True).start()
     threading.Thread(target=update_check_loop, daemon=True).start()
     threading.Thread(target=onedrive_soon, daemon=True).start()
+    threading.Thread(target=lambda: _quiet(after_update), daemon=True).start()
     threading.Thread(target=plan_loop, daemon=True).start()
     _quiet(ensure_helper)                         # an update brings a new helper: put it where Chrome loads it from
-    class_resume()
+    _quiet(class_resume)                          # one bad recording file must not stop the server from starting
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

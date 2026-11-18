@@ -205,7 +205,7 @@ def walk(ctx, site, folder, depth=0, out=None, failed=None):
         return out
     url = (f"{site}/_api/web/GetFolderByServerRelativePath(decodedurl='{quote(folder.replace(chr(39), chr(39) * 2))}')?$expand=Files,Folders"
            "&$select=Files/Name,Files/ServerRelativeUrl,Files/TimeLastModified,Files/Length,Folders/Name,Folders/ServerRelativeUrl"
-           "&$expand=Files/ModifiedBy&$select=Files/ModifiedBy/Email")
+           "&$expand=Files/ModifiedBy&$select=Files/ModifiedBy/Email")   # tested with the brother's OneDrive: works
     try:
         r = ctx.request.get(url, headers=JSONH)
         j = r.json() if r.ok else None
@@ -226,7 +226,10 @@ def walk(ctx, site, folder, depth=0, out=None, failed=None):
 
 MATERIAL = ("worksheet", "answer", "article", "case", "study", "report", "week", "lesson", "presentation", "group", "table",
             "template", "question", "sqs", "rqs", "task", "notes", "slides", "reading", "essay", "guide", "handout", "quiz",
-            "test", "exam", "plan", "brief", "rubric", "criteria", "activity", "exercise", "review", "summary", "glossary")
+            "test", "exam", "plan", "brief", "rubric", "criteria", "activity", "exercise", "review", "summary", "glossary",
+            "syllabus", "outline", "course", "unit", "topic", "module", "overview", "homework", "assignment", "sheet",
+            "formula", "vocab", "chapter", "lecture", "seminar", "tutorial", "practice", "revision", "handbook",
+            "schedule", "introduction", "booklet", "resource", "material", "example", "sample", "instruction")
 
 
 def named_after_someone_else(stem, my_names):
@@ -303,7 +306,7 @@ def sync():
                         my_names.add(j["Title"].split()[0].lower())
                 except Exception:
                     me[root["site"]] = ""
-            if root["kind"] == "Folder" and "@" not in me.get(root["site"], ""):
+            if "@" not in me.get(root["site"], ""):     # files too: wanted() would drop them silently
                 failed.append(f"{root['name']} (couldn't check who you are there; will try again)")
                 continue
             files = walk(ctx, root["site"], root["path"], failed=failed) if root["kind"] == "Folder" else \
@@ -346,7 +349,8 @@ def sync():
         log += [{**x, "date": now()} for x in added + updated]
         save(DATA / "sync_log.json", log[-2000:])
     status(state="idle", finished=now(), last_ok=now(), added=added, updated=updated, failed=failed[:50],
-           step=(f"{len(added)} new, {len(updated)} updated from OneDrive." if added or updated else "Nothing new on OneDrive."))
+           step=(f"{len(added)} new, {len(updated)} updated from OneDrive." if added or updated else "Nothing new on OneDrive.")
+           + (f" {len(failed)} couldn't be read; will try again." if failed else ""))
 
 
 def login():

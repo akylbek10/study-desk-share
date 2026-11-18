@@ -14,7 +14,7 @@ const topicChip = (id, extra = "") => {
   if (!t) return "";
   const state = t.status === "confirmed" ? "done" : t.status === "studied" ? "started" : t.behind ? "late" : "";
   const label = t.status === "confirmed" ? "confirmed" : t.status === "studied" ? "studied, not confirmed" : t.behind ? "behind: not studied" : "not studied yet";
-  return `<a class="pg-chip ${state} ${extra}" href="#/topic/${t.id}/check" data-tip="${esc(t.name)}: ${label}">${esc(t.name)}</a>`;
+  return `<a class="pg-chip ${state} ${extra}" href="#/topic/${t.id}/check" data-tip="${esc(esc(t.name))}: ${label}">${esc(t.name)}</a>`;
 };
 
 function sourceNote(s) {
@@ -60,18 +60,18 @@ function thisWeekHTML() {
 async function renderProgram() {
   setNav("program", "Programme");
   const d = PG.d || await programLoad();
-  if (!d || !d.subjects.length) { view.innerHTML = `<div class="rows empty" style="margin-top:40px"><h3>No course plan yet</h3></div>`; return; }
-  const subs = d.subjects.filter(s => s.weeks.length);
+  const subs = d ? d.subjects.filter(s => s.weeks.length) : [];
+  if (!subs.length) { view.innerHTML = `<div class="rows empty" style="margin-top:40px"><h3>No course plan yet</h3></div>`; return; }
   const byWeek = (s, n) => s.weeks.find(w => w.week === n);
   const cell = (s, n) => {
     const w = byWeek(s, n);
     if (!w) return `<td class="pg-empty">–</td>`;
     const prev = byWeek(s, n - 1);
-    const same = prev && prev.focus === w.focus && JSON.stringify(prev.topics) === JSON.stringify(w.topics);
     const c = n === d.week && s.source === "compass" ? s.compass : null;
-    return `<td class="${w.guess ? "pg-guess" : ""}">
-      ${same ? `<span class="muted small">continued</span>` : `<div class="pg-chips">${(c ? c.topics : w.topics).map(id => topicChip(id)).join("")}</div>`}
-      <div class="pg-focus">${esc(c ? c.summary : w.focus)}${w.guess ? " <em>(estimate)</em>" : ""}</div>
+    const same = !c && prev && prev.focus === w.focus && JSON.stringify(prev.topics) === JSON.stringify(w.topics);   // a Compass post always shows
+    return `<td class="${w.guess && !c ? "pg-guess" : ""}">
+      ${same ? `<span class="muted small">continued</span>` : `<div class="pg-chips">${((c ? c.topics : w.topics) || []).map(id => topicChip(id)).join("")}</div>`}
+      <div class="pg-focus">${esc(c ? c.summary : w.focus)}${w.guess && !c ? " <em>(estimate)</em>" : ""}</div>
       ${w.assessment ? `<span class="tag soon pg-assess">${esc(w.assessment)}</span>` : ""}
     </td>`;
   };
@@ -121,8 +121,10 @@ function compassDialog() {
     const f = [...(e.clipboardData?.files || [])].find(f => f.type.startsWith("image/"));
     if (f) { e.preventDefault(); const dt = new DataTransfer(); dt.items.add(f); $("#cp-img", dlg).files = dt.files; toast("Screenshot added"); }
   });
+  let downOutside = false;                                     // close on a click outside, not when a text selection ends there
+  dlg.addEventListener("mousedown", e => { downOutside = e.target === dlg; });
   dlg.addEventListener("click", async e => {
-    if (e.target === dlg) return dlg.close();
+    if (e.target === dlg && downOutside) return dlg.close();
     const b = e.target.closest("[data-act=read]");
     if (!b) return;
     const text = $("#cp-text", dlg).value.trim();

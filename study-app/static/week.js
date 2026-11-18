@@ -7,8 +7,8 @@ const WK_GROUPS = [["slides", "Slides"], ["worksheet", "Worksheets"], ["reading"
 async function renderWeek(n) {
   const d = await api("/api/week", { week: n ? Number(n) : null });
   setNav("program", `Week ${d.week}`);
-  const nav = d.weeks.length ? `<div class="seg" role="group" aria-label="Week">${[d.week - 1, d.week + 1].map((w, i) =>
-    d.weeks.includes(w) ? `<a class="btn sm" href="#/week/${w}">${i ? "Week " + w + " →" : "← Week " + w}</a>` : "").join("")}</div>` : "";
+  const nav = d.weeks.length ? `<div class="seg" role="group" aria-label="Week">${[d.weeks.filter(w => w < d.week).pop(), d.weeks.find(w => w > d.week)].map((w, i) =>   // neighbours, even across a gap
+    w != null ? `<a class="btn sm" href="#/week/${w}">${i ? "Week " + w + " →" : "← Week " + w}</a>` : "").join("")}</div>` : "";
   view.innerHTML = `
     <div class="page-head"><div>
       <a class="crumb" href="#/program">${icon("chevronLeft")}Programme</a>

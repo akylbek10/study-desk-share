@@ -34,6 +34,7 @@ async function readInPage(site, calls) {
     if (!/^[A-Za-z]+\.svc\/[A-Za-z]+$/.test(service)) return { status: 0, text: "not a Compass service" };
     const r = await fetch(`${site}/Services/${service}`, { method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json; charset=utf-8", "Accept": "application/json" }, body: JSON.stringify(body) });
+    if (r.status === 401 || (r.redirected && /login|signin/i.test(r.url))) return { expired: true };
     let data = null; const text = await r.text();
     try { data = JSON.parse(text); } catch (e) {}
     await new Promise(ok => setTimeout(ok, 500));            // a normal pace
@@ -57,13 +58,14 @@ async function readInPage(site, calls) {
       out[c.key] = {};
       for (const id of ids) out[c.key][id] = await call(c.service, fill(c.body, { activityId: id }));
     } else out[c.key] = await call(c.service, fill(c.body, {}));
+    if (out[c.key]?.expired) return { signin: true, diag };   // a tab left open after the Compass session ended
   }
   return out;
 }
 
 async function compassTab(openIfNone) {
   const tabs = await chrome.tabs.query({ url: "https://*.compass.education/*" });
-  const ok = tabs.find(t => t.status === "complete" && !/login|Account\/Login/i.test(t.url || ""));
+  const ok = tabs.find(t => t.status === "complete" && !/login|Account\/Login|\/Services\//i.test(t.url || ""));   // not a file download
   if (ok || !openIfNone) return { tab: ok, made: false };
   const tab = await chrome.tabs.create({ url: SITE + "/", active: false });     // a background tab, closed afterwards
   for (let i = 0; i < 40; i++) {
@@ -91,7 +93,10 @@ async function readCompass(reason) {
   const { tab, made } = await compassTab(true);
   let raw = { signin: true };
   try {
-    if (tab) {
+    const now = tab && await chrome.tabs.get(tab.id).catch(() => null);
+    // sent on to a sign-in page elsewhere (Microsoft): Chrome hides that address from us and won't let us read it
+    if (now && (!/^https:\/\/[^/]+\.compass\.education\//.test(now.url || "") || /login/i.test(now.url))) raw = { signin: true };
+    else if (tab) {
       const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: readInPage, args: [site, calls] });
       raw = res?.result || { signin: true };
     }
