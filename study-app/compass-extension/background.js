@@ -63,6 +63,45 @@ async function readInPage(site, calls) {
   return out;
 }
 
+// Files a teacher attached to a Compass "email the class": Compass only hands them to a signed-in browser, so they
+// are fetched here, in a Compass page, like clicking the link. Only Compass's own email-attachment links are fetched.
+async function fetchInPage(urls) {
+  const out = [];
+  for (const url of urls) {
+    if (!new RegExp("^" + location.origin.replace(/\./g, "\\.") + "/Services/FileDownload/EmailAttachmentHandler\\?").test(url)) {
+      out.push({ url, error: "not a Compass attachment link" }); continue;
+    }
+    try {
+      const r = await fetch(url, { credentials: "same-origin" });
+      if (!r.ok) { out.push({ url, error: `HTTP ${r.status}` }); continue; }
+      const buf = new Uint8Array(await r.arrayBuffer());
+      if (buf.length > 30 * 1024 * 1024) { out.push({ url, error: "too big" }); continue; }
+      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      out.push({ url, data: btoa(bin) });
+    } catch (e) { out.push({ url, error: String(e).slice(0, 120) }); }
+    await new Promise(ok => setTimeout(ok, 800));            // a normal pace
+  }
+  return out;
+}
+
+async function fetchFiles(targets) {
+  const jobs = targets.filter(d => Array.isArray(d.files) && d.files.length);
+  if (!jobs.length) return;
+  const { tab, made } = await compassTab(true);
+  try {
+    if (!tab) return;
+    for (const d of jobs) {
+      const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: fetchInPage,
+        args: [d.files.map(f => f.url)] });
+      for (const f of res?.result || []) {
+        await fetch(`http://127.0.0.1:${d.port}/api/compass/file`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(f) }).catch(() => {});
+      }
+    }
+  } catch (e) { /* tried again on the next tick */ }
+  finally { if (made && tab) chrome.tabs.remove(tab.id).catch(() => {}); }
+}
+
 async function compassTab(openIfNone) {
   const tabs = await chrome.tabs.query({ url: "https://*.compass.education/*" });
   const ok = tabs.find(t => t.status === "complete" && !/login|Account\/Login|\/Services\//i.test(t.url || ""));   // not a file download
@@ -130,6 +169,7 @@ async function tick() {
   const { last = 0 } = await chrome.storage.local.get("last");
   const due = Date.now() - last > EVERY_H * 3600e3;
   if (due || targets.some(d => d.want)) await readCompass(due ? "schedule" : "asked");
+  await fetchFiles(targets);
 }
 
 chrome.runtime.onInstalled.addListener(() => { chrome.alarms.create("tick", { periodInMinutes: 1 }); readCompass("installed"); });

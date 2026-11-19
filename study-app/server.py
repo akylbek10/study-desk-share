@@ -1388,7 +1388,7 @@ def file_week(path):
     n = int(m.group(1)) if m else None
     if not m and (m := re.search(r"\bweek\s+(" + "|".join(WEEK_WORDS) + r")(?![\w-])", low)):   # "Week Six"
         n = WEEK_WORDS.index(m.group(1)) + 1
-    if not m and (d := re.search(r"/outlook/(\d{4}-\d{2}-\d{2}) ", low)):   # an emailed file: the week it was sent
+    if not m and (d := re.search(r"/(?:outlook|compass)/(\d{4}-\d{2}-\d{2}) ", low)):   # an emailed file: the week it was sent
         n = week_of(date.fromisoformat(d.group(1)))
     return n if n and 1 <= n <= 40 else None
 
@@ -2525,7 +2525,7 @@ def notify_files(added, updated):
             name = x["path"].rsplit("/", 1)[-1]
             out.append({"id": f"file:{x['path']}:{stamp}", "kind": "file", "subject": subj,
                         "link": f"#/topic/{tid}/files" if tid else "#/files",
-                        "title": f"{SHORT_SUBJECT.get(course, course)}: " + ("file from an email" if x.get("source") == "outlook"
+                        "title": f"{SHORT_SUBJECT.get(course, course)}: " + ("file from an email" if x.get("source") == "outlook" else "file from a Compass email" if x.get("source") == "compass"
                                  else f"{'new' if kind == 'new' else 'updated'} file"),
                         "text": name + (f" ({TOPICS[tid]['name']})" if tid else "")})
     notify(out)
@@ -2635,6 +2635,7 @@ def api_timetable_image(b):
 # every minute and posts what Compass returned to /api/compass/push.
 HELPER = paths.HOME / "Chrome helper"
 COMPASS_WANT = {"at": 0, "seen": 0}
+STARTED = time.time()
 
 
 def ensure_helper():
@@ -2677,7 +2678,7 @@ def helper_version():
 def api_compass_want(_):
     COMPASS_WANT["seen"] = time.time()            # only the helper asks this: so we know it's installed
     return {"want": time.time() - COMPASS_WANT["at"] < 600, "every_hours": COMPASS_EVERY_H, "calls": COMPASS_CALLS,
-            "helper_version": helper_version()}
+            "helper_version": helper_version(), "files": compass_files_wanted()}
 
 
 def api_compass_push(b):
@@ -2863,11 +2864,11 @@ def outlook_step():
         outlook_apply()
 
 
-def file_hashes(sizes):
-    """sha1 -> path of the course files (outside Outlook folders) whose size is one of `sizes`."""
+def file_hashes(sizes, outlook=False):
+    """sha1 -> path of the course files whose size is one of `sizes` (outside email folders unless outlook=True)."""
     out = {}
     for f in COURSES.rglob("*"):
-        if f.is_file() and "/Outlook/" not in f.as_posix() and f.stat().st_size in sizes:
+        if f.is_file() and (outlook or not re.search(r"/(Outlook|Compass)/", f.as_posix())) and f.stat().st_size in sizes:
             out[hashlib.sha1(f.read_bytes()).hexdigest()] = f
     return out
 
@@ -2890,7 +2891,9 @@ def outlook_apply():
     filed, subjects = [], list(CONFIG["subjects"])
     teachers = sorted({c.get("teacher", "") for c in CONFIG.get("timetable", []) if c.get("teacher")})
     for m in todo:
-        names = [a["name"] for a in m.get("attachments", [])]
+        if m.get("kind") == "compass":            # a teacher's "email the class" in Compass: files behind links
+            compass_mail(m)
+        names = [a["name"] for a in m.get("attachments", [])] + [f["name"] for f in m.get("files", [])]
         try:
             r = gemini([{"role": "user", "parts": [{"text":
                 f"Today is {today()}. An International Foundation Year student's subjects: {subjects}. Their teachers: "
@@ -2915,6 +2918,8 @@ def outlook_apply():
             break                                 # no AI right now: the rest is read next time
         read.add(m["id"])
         subj = r.get("subject") if r.get("subject") in CONFIG["subjects"] else ""
+        if m.get("kind") == "compass":
+            subj, r["relevant"] = class_subject(m.get("class")) or subj, True
         when = m["date"][:10]
         recent = when >= (date.today() - timedelta(days=14)).isoformat()      # older emails are history
         admin = [str(x).strip() for x in r.get("admin_todo") or [] if str(x).strip()][:5]
@@ -2928,7 +2933,7 @@ def outlook_apply():
                 (DATA / a["file"]).unlink(missing_ok=True)
             m.update(text="", attachments=[], links=[])
             continue
-        if r.get("relevant"):
+        if r.get("relevant") and m.get("kind") != "compass":    # a Compass class email has its own notice
             notify([{"id": f"mail:{m['id'][-40:]}", "kind": "post", "subject": subj, "link": "#/today",
                      "title": f"Email from {m['from_name'] or m['from']}" + (f" ({SHORT_SUBJECT.get(subj, subj)})" if subj else ""),
                      "text": str(r.get("summary") or m["subject"])[:160]}])
@@ -2966,21 +2971,107 @@ def outlook_apply():
         save("outlook_auto.json", auto)
     outlook_dedup()
     if filed:
-        log = open(DATA / "outlook.log", "a")
-        subprocess.run([str(VENV_PY), str(APP / "outlook.py"), "text"], cwd=str(APP), stdout=log, stderr=log, env=os.environ)
-        log.close()
-        reload_files()
-        _quiet(auto_sort)
-        _quiet(notify_files, filed, [])
+        file_in(filed)
+
+
+def class_subject(code):
+    """Your subject for a Compass class code ("FSTM1102" -> Technical Maths): from the classes Compass showed."""
+    code = str(code or "").upper()
+    letters = re.match(r"[A-Z]+", code)
+    if not letters:
+        return ""
+    for name, subj in load("compass_map.json", {}).items():
+        up = name.upper()
+        if subj in CONFIG["subjects"] and (up.startswith(code) or up.split(" ")[0] == letters.group(0)):
+            return subj
+    for c in CONFIG.get("timetable", []):            # the timetable keeps the class code too
+        if str(c.get("code", "")).upper().startswith(letters.group(0)) and c["subject"] in CONFIG["subjects"]:
+            return c["subject"]
+    return ""
+
+
+def compass_mail(m):
+    """Ring the bell at once and ask the Chrome helper to fetch the files (Compass lets only a signed-in browser)."""
+    subj = class_subject(m.get("class"))
+    short = SHORT_SUBJECT.get(subj, subj or m.get("class") or "Compass")
+    who = re.sub(r"\s*\(?via Compass\)?", "", m.get("from_name") or "", flags=re.I).strip()
+    who = "your teacher" if not who or who.lower() == "compass" else who
+    names = [f["name"] for f in m.get("files", [])]
+    if not names and m["date"][:10] >= (date.today() - timedelta(days=3)).isoformat():   # files ring once they are in
+        notify([{"id": f"cmail:{m['id'][-40:]}", "kind": "post", "subject": subj, "link": "#/today",
+                 "title": f"{short}: email from {who} (Compass)", "text": m.get("subject", "")[:160]}])
+    if not names:
+        return
+    with LOCK:
+        q = load("compass_files.json", {})
+        for f in m["files"]:
+            q.setdefault(f["url"], {"name": f["name"], "subject": subj, "date": m["date"][:10],
+                                    "title": m.get("subject", ""), "state": "want", "tries": 0})
+        save("compass_files.json", q)
+
+
+def compass_files_wanted():
+    q = load("compass_files.json", {})
+    return [{"url": u, "name": f["name"]} for u, f in q.items() if f["state"] == "want" and f.get("subject")][:5]
+
+
+def api_compass_file(b):
+    """A file the Chrome helper downloaded from Compass for us (only links Study Desk asked for are accepted)."""
+    url = str(b.get("url", ""))
+    with LOCK:
+        q = load("compass_files.json", {})
+        f = q.get(url)
+        if not f or f["state"] != "want":
+            raise ValueError("not asked for")
+        if not b.get("data"):
+            f["tries"] += 1
+            f["state"] = "failed" if f["tries"] >= 5 else "want"
+            f["error"] = str(b.get("error") or "")[:120]
+            save("compass_files.json", q)
+            return {"ok": True}
+        data = base64.b64decode(b["data"])
+        f["state"] = "done"
+        save("compass_files.json", q)
+    if data[:15].lstrip().lower().startswith((b"<!doctype", b"<html")):   # a sign-in or error page, not the file
         with LOCK:
-            sl = load("sync_log.json", [])
-            save("sync_log.json", (sl + [{**x, "date": datetime.now().isoformat(timespec="seconds")} for x in filed])[-2000:])
-        _quiet(plan_refresh)
+            q = load("compass_files.json", {})
+            q[url].update(state="want" if q[url]["tries"] < 4 else "failed", tries=q[url]["tries"] + 1, error="got a web page")
+            save("compass_files.json", q)
+        return {"ok": True}
+    sha = hashlib.sha1(data).hexdigest()
+    if sha in file_hashes({len(data)}, outlook=True):
+        return {"ok": True, "duplicate": True}     # already there from IntoStudy, OneDrive or an email
+    title = re.sub(r"[^\w .,()&-]+", " ", f["title"]).strip()[:60] or "Class email"
+    folder = f"{f['subject']}/Compass/{f['date']} {title}"
+    dest = COURSES / folder / f["name"]
+    if not dest.resolve().is_relative_to(COURSES.resolve()):
+        raise ValueError("bad file name")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    recent = f["date"] >= (date.today() - timedelta(days=3)).isoformat()   # an old email's file: in Files, no bell
+    threading.Thread(target=lambda: _quiet(file_in, [{"path": f"{folder}/{f['name']}", "course": f["subject"],
+                                                      "kind": "added", "source": "compass"}], recent), daemon=True).start()
+    return {"ok": True}
+
+
+def file_in(filed, ring=True):
+    """New files Study Desk put under courses/ itself: text, sorting, the bell, the log, new weeks."""
+    log = open(DATA / "outlook.log", "a")
+    subprocess.run([str(VENV_PY), str(APP / "outlook.py"), "text"], cwd=str(APP), stdout=log, stderr=log, env=os.environ)
+    log.close()
+    reload_files()
+    _quiet(auto_sort)
+    if ring:
+        _quiet(notify_files, filed, [])
+    with LOCK:
+        sl = load("sync_log.json", [])
+        save("sync_log.json", (sl + [{**x, "date": datetime.now().isoformat(timespec="seconds")} for x in filed])[-2000:])
+    _quiet(plan_refresh)
 
 
 def outlook_dedup():
     """A file a teacher emailed and later also put on IntoStudy or OneDrive: keep the IntoStudy / OneDrive copy."""
-    mine = [f for f in COURSES.glob("*/Outlook/**/*") if f.is_file()]
+    mine = [f for d in ("Outlook", "Compass") for f in COURSES.glob(f"*/{d}/**/*") if f.is_file()]
     if not mine:
         return
     known = file_hashes({f.stat().st_size for f in mine})
@@ -3255,6 +3346,14 @@ def compass_loop():
             if last and due and st.get("via") != "extension" and st.get("state") not in ("login", "blocked") \
                     and not compass_running():
                 start_compass()
+            # the helper lives in one Chrome profile: Chrome (or that profile) closed = Compass not read at all
+            seen = st.get("seen") or last
+            if st.get("via") == "extension" and seen and time.time() - STARTED > 1800 \
+                    and datetime.fromisoformat(seen) < datetime.now() - timedelta(hours=6) \
+                    and time.time() - COMPASS_WANT["seen"] > 900:
+                notify([{"id": f"compass-stale:{today()}", "kind": "update", "link": "#/settings",
+                         "title": "Compass hasn't been read since " + datetime.fromisoformat(seen).strftime("%a %H:%M"),
+                         "text": "Open Chrome with the profile that has the Study Desk helper (and Compass in it)."}])
         except Exception as e:
             print("compass loop:", e)
         time.sleep(1200)
@@ -4766,6 +4865,7 @@ ROUTES = {
     ("POST", "/api/compass/connect"): api_compass_connect,
     ("POST", "/api/onedrive"): api_onedrive,
     ("POST", "/api/outlook"): api_outlook,
+    ("POST", "/api/compass/file"): api_compass_file,
     ("GET", "/api/notify"): api_notify,
     ("POST", "/api/notify/seen"): api_notify_seen,
     ("GET", "/api/compass/want"): api_compass_want,
@@ -4838,7 +4938,7 @@ MAC_ROUTES = {api_file_view, api_work_save, api_file_open, api_agent, api_compas
               api_handoff_open, api_files_sort, api_files_assign, api_files_check, api_sync_start, api_settings,
               api_class_start, api_class_stop, api_class_redo, api_class_delete, api_setup_name, api_setup_agy,
               api_setup_courses, api_setup_programme, api_setup_done, api_compass_connect, api_update, api_timetable_image,
-              api_compass_push, api_compass_helper, api_onedrive, api_outlook}
+              api_compass_push, api_compass_helper, api_onedrive, api_outlook, api_compass_file}
 PASSWORD = os.environ.get("STUDY_PASSWORD", "")
 SESSION_DAYS = 90
 LOGIN_PAGE = b"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -4894,7 +4994,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if HOSTED:                                # Vercel only routes its own domains here; refuse other sites' pages
             return origin is not None and origin != f"https://{self.headers.get('Host', '')}"
-        if origin and origin.startswith("chrome-extension://") and self.path.split("?")[0] in ("/api/compass/want", "/api/compass/push"):
+        if origin and origin.startswith("chrome-extension://") and self.path.split("?")[0] in ("/api/compass/want", "/api/compass/push", "/api/compass/file"):
             return self.headers.get("Host", "") not in self.OK_HOSTS
         return (self.headers.get("Host", "") not in self.OK_HOSTS
                 or (origin is not None and origin.removeprefix("http://") not in self.OK_HOSTS))

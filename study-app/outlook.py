@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from datetime import date, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 
 import paths
 
@@ -28,6 +29,9 @@ FILES = DATA / "outlook_files"
 OWA = "https://outlook.cloud.microsoft"
 API = OWA + "/api/v2.0/me"
 STAFF = ("intoglobal.com", "iupl.onmicrosoft.com", "man.my-into.com", "manchester.ac.uk", "ncuk.ac.uk")
+COMPASS_MAIL = "compass@compass.email"         # Compass's "email the class": no news post, only this email
+CLASS_RE = re.compile(r"Re:\s*Class\s*-\s*([A-Z]{2,6}\d{3,5}[A-Z]?)\b")
+FILE_LINK = re.compile(r"https://[\w.-]+\.compass\.education/Services/FileDownload/EmailAttachmentHandler\?[^\s<>\"]+")   # names can hold ( )
 MAX_FILE = 30 * 1024 * 1024
 SKIP_EXT = {".ics", ".vcf", ".p7s", ".eml", ".msg"}
 
@@ -122,6 +126,10 @@ def sync():
     last = load(STATUS, {}).get("last_ok")
     if not load(STATUS, {}).get("admin_v1"):      # 1.0.7 reads staff emails once more (admin deadlines): fetch them again
         seen, last = {k: v for k, v in seen.items() if not v.get("kept")}, None
+    if not load(STATUS, {}).get("compass_v1"):    # 1.0.8 keeps teachers' Compass class emails: look at the last 3 weeks again
+        cut = (date.today() - timedelta(days=21)).isoformat()
+        seen = {k: v for k, v in seen.items() if v.get("kept") or v.get("date", "") < cut}
+        last = min(last or now(), (date.today() - timedelta(days=21)).isoformat())
     since = (datetime.fromisoformat(last) - timedelta(days=2)).date() if last else term_start() - timedelta(days=14)
     kept = 0
     with sync_playwright() as p:
@@ -143,7 +151,7 @@ def sync():
                 if m["Id"] in seen:
                     continue
                 frm = (m.get("From") or {}).get("EmailAddress") or {}
-                if staff(frm.get("Address"), me):
+                if staff(frm.get("Address"), me) or (frm.get("Address") or "").lower() == COMPASS_MAIL:
                     todo.append((m, frm))
                 else:
                     seen[m["Id"]] = {"date": m["ReceivedDateTime"][:10]}   # only the id: nothing about it is kept
@@ -155,6 +163,17 @@ def sync():
                                 headers={**H, "Prefer": 'outlook.body-content-type="text"'})
             body = (r.json().get("Body") or {}).get("Content", "") if r.ok else ""
             text = re.sub(r"\n{3,}", "\n\n", body.replace("\r", "")).strip()
+            extra = {}
+            if (frm.get("Address") or "").lower() == COMPASS_MAIL:
+                code = CLASS_RE.search(text[:600])
+                if not code:                      # sign-in codes, digests, reminders: nothing of it is kept
+                    seen[m["Id"]] = {"date": m["ReceivedDateTime"][:10]}
+                    continue
+                files = []
+                for u in dict.fromkeys(FILE_LINK.findall(text)):
+                    name = clean((parse_qs(urlsplit(u).query).get("fileName") or ["file"])[0])
+                    files.append({"url": u, "name": name})
+                extra = {"kind": "compass", "class": code.group(1), "files": files[:20]}
             atts, folder = [], FILES / hashlib.sha1(m["Id"].encode()).hexdigest()[:12]
             if m.get("HasAttachments"):
                 lst = get(ctx, H, f"{API}/messages/{m['Id']}/attachments?$select=Id,Name,Size,IsInline,ContentType").json()
@@ -178,7 +197,7 @@ def sync():
             mail = [x for x in mail if x["id"] != m["Id"]]
             mail.append({"id": m["Id"], "date": m["ReceivedDateTime"], "from": (frm.get("Address") or "").lower(),
                          "from_name": frm.get("Name") or "", "subject": (m.get("Subject") or "")[:200],
-                         "text": text[:8000], "attachments": atts, "links": links})
+                         "text": text[:8000], "attachments": atts, "links": links, **extra})
             seen[m["Id"]] = {"date": m["ReceivedDateTime"][:10], "kept": True}
             kept += 1
             save(MAIL, mail[-400:])
@@ -188,7 +207,7 @@ def sync():
     cutoff = (date.today() - timedelta(days=400)).isoformat()
     save(SEEN, {k: v for k, v in seen.items() if v.get("date", "") >= cutoff})
     save(MAIL, mail[-400:])
-    status(state="idle", finished=now(), last_ok=now(), added=kept, admin_v1=True,
+    status(state="idle", finished=now(), last_ok=now(), added=kept, admin_v1=True, compass_v1=True,
            step=f"{kept} new emails from your teachers." if kept else "No new emails from your teachers.")
 
 
