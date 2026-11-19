@@ -6,6 +6,7 @@ Your Gemini API key is stored in study-app/.env on this Mac only.
 """
 import base64
 import fnmatch
+import hashlib
 import json
 import mimetypes
 import os
@@ -919,7 +920,7 @@ def api_state(_):
             "model": p["settings"].get("model", ""), "name": p["settings"].get("name", ""),
             "setup_needed": needs_setup(), "app": bool(os.environ.get("STUDY_HOME")), "version": app_version(),
             "compass": compass_public(),
-            "telegram": (DATA / "agent_state.json").exists(), "unread": unread_count(), "onedrive": onedrive_public(),      # the Telegram agent (Hermes) has been used here
+            "telegram": (DATA / "agent_state.json").exists(), "unread": unread_count(), "onedrive": onedrive_public(), "outlook": outlook_public(),      # the Telegram agent (Hermes) has been used here
             "due_total": sum(c["due"] <= tdy for c in cards)}
 
 
@@ -1387,6 +1388,8 @@ def file_week(path):
     n = int(m.group(1)) if m else None
     if not m and (m := re.search(r"\bweek\s+(" + "|".join(WEEK_WORDS) + r")(?![\w-])", low)):   # "Week Six"
         n = WEEK_WORDS.index(m.group(1)) + 1
+    if not m and (d := re.search(r"/outlook/(\d{4}-\d{2}-\d{2}) ", low)):   # an emailed file: the week it was sent
+        n = week_of(date.fromisoformat(d.group(1)))
     return n if n and 1 <= n <= 40 else None
 
 
@@ -1502,7 +1505,7 @@ def api_week(b):
             groups = defaultdict(list)
             for f in pick:
                 groups[file_kind(f)].append({"path": f, "name": f.rsplit("/", 1)[-1].removesuffix(".txt"),
-                                             "onedrive": "/OneDrive/" in f})
+                                             "onedrive": "/OneDrive/" in f, "email": "/Outlook/" in f})
             topics.append({"id": tid, "name": TOPICS[tid]["name"], "files": groups, "more": len(files) - len(pick),
                            "links": api_topic_links({"topic": tid})["links"], "learn": learn_summary(tid),
                            "review": bool(review_load(tid).get("md"))})
@@ -1512,7 +1515,7 @@ def api_week(b):
                 groups = defaultdict(list)
                 for f in loose[:30]:
                     groups[file_kind(f)].append({"path": f, "name": f.rsplit("/", 1)[-1].removesuffix(".txt"),
-                                                 "onedrive": "/OneDrive/" in f})
+                                                 "onedrive": "/OneDrive/" in f, "email": "/Outlook/" in f})
                 tid = Counter(topic_of(f, sorted_map())[0] for f in loose).most_common(1)[0][0]
                 topics.append({"id": tid if tid in TOPICS else None, "name": f"Week {n} files", "files": groups,
                                "more": max(0, len(loose) - 30), "links": [], "learn": learn_summary(tid) if tid in TOPICS else None,
@@ -2219,7 +2222,7 @@ def api_sync_start(b):
 
 def auto_sync_loop():
     """Check IntoStudy for new files on start and then every few hours while the app is open."""
-    for name in ("sync_status.json", "onedrive_status.json", "compass_status.json"):   # left over from before a restart
+    for name in ("sync_status.json", "onedrive_status.json", "outlook_status.json", "compass_status.json"):   # left over from before a restart
         st = load(name, {})
         if st.get("state") in ("running", "login_window"):
             st.update(state="idle", step="The last check was interrupted.")
@@ -2522,7 +2525,8 @@ def notify_files(added, updated):
             name = x["path"].rsplit("/", 1)[-1]
             out.append({"id": f"file:{x['path']}:{stamp}", "kind": "file", "subject": subj,
                         "link": f"#/topic/{tid}/files" if tid else "#/files",
-                        "title": f"{SHORT_SUBJECT.get(course, course)}: {'new' if kind == 'new' else 'updated'} file",
+                        "title": f"{SHORT_SUBJECT.get(course, course)}: " + ("file from an email" if x.get("source") == "outlook"
+                                 else f"{'new' if kind == 'new' else 'updated'} file"),
                         "text": name + (f" ({TOPICS[tid]['name']})" if tid else "")})
     notify(out)
 
@@ -2782,17 +2786,19 @@ def onedrive_cycle(full=True):
             return
         ONEDRIVE["busy"] = True
     try:
-        if full or not load("onedrive_found.json", {}):
-            if onedrive_run("list") or load("onedrive_status.json", {}).get("state") == "login":
-                return
-        onedrive_map()
-        code = onedrive_run("sync")
-        st = load("onedrive_status.json", {})
-        if code == 0 and st.get("state") == "idle" and (st.get("added") or st.get("updated")):
-            reload_files()
-            _quiet(auto_sort)
-            _quiet(notify_files, st.get("added"), st.get("updated"))
-            _quiet(plan_refresh)
+        listed = not (full or not load("onedrive_found.json", {})) or \
+            not (onedrive_run("list") or load("onedrive_status.json", {}).get("state") == "login")
+        if listed:
+            onedrive_map()
+            code = onedrive_run("sync")
+            st = load("onedrive_status.json", {})
+            if code == 0 and st.get("state") == "idle" and (st.get("added") or st.get("updated")):
+                reload_files()
+                _quiet(auto_sort)
+                _quiet(notify_files, st.get("added"), st.get("updated"))
+                _quiet(plan_refresh)
+        if outlook_on() and load("onedrive_status.json", {}).get("state") != "login":   # same Microsoft sign-in
+            _quiet(outlook_step)
     finally:
         ONEDRIVE["busy"] = False
 
@@ -2831,6 +2837,180 @@ def onedrive_public():
     return {**{k: st.get(k) for k in ("state", "step", "error", "last_ok")}, "running": ONEDRIVE["busy"],
             "roots": len(roots), "linked": sorted({v for v in mapping.values() if v}),
             "files": len(load("onedrive_manifest.json", {}))}
+
+
+# ---------- Outlook: class emails from teachers and INTO. outlook.py reads them (read-only); this files their
+# attachments like IntoStudy files, turns what they ask into tasks and rings the bell ----------
+OUTLOOK_SCHEMA = {"type": "object", "properties": {
+    "relevant": {"type": "boolean"}, "subject": {"type": "string"}, "summary": {"type": "string"},
+    "todo": {"type": "array", "items": {"type": "string"}}, "change": {"type": "string"},
+    "files": {"type": "array", "items": {"type": "integer"}},
+    "admin_todo": {"type": "array", "items": {"type": "string"}}},
+    "required": ["relevant", "subject", "summary", "todo", "change", "files", "admin_todo"]}
+
+
+def outlook_on():
+    return progress()["settings"].get("outlook") is not False      # on unless turned off in Settings
+
+
+def outlook_step():
+    """Called inside onedrive_cycle, which holds the Microsoft browser profile."""
+    log = open(DATA / "outlook.log", "a")
+    code = subprocess.Popen([str(VENV_PY), str(APP / "outlook.py"), "sync"], cwd=str(APP), stdout=log, stderr=log,
+                            env=os.environ).wait()
+    log.close()
+    if code == 0:
+        outlook_apply()
+
+
+def file_hashes(sizes):
+    """sha1 -> path of the course files (outside Outlook folders) whose size is one of `sizes`."""
+    out = {}
+    for f in COURSES.rglob("*"):
+        if f.is_file() and "/Outlook/" not in f.as_posix() and f.stat().st_size in sizes:
+            out[hashlib.sha1(f.read_bytes()).hexdigest()] = f
+    return out
+
+
+def outlook_apply():
+    """Each new staff email: one AI read (subject, what it asks, room or cover changes, which attachments are course
+    material), then file the attachments, add the tasks and ring the bell. Afterwards only what the app needs is
+    kept: no email text, no attachment that is not course material."""
+    mails, auto = load("outlook_mail.json", []), load("outlook_auto.json", {})
+    read = set(auto.get("read", []))
+    if not auto.get("admin_v1"):                  # 1.0.7: emails read before are read once more, for admin deadlines only
+        auto.update(admin_v1=True, admin_only=sorted(set(auto.get("admin_only", [])) | read))
+        read = set()
+    again = set(auto.get("admin_only", []))
+    todo = [m for m in mails if m["id"] not in read][:40]
+    if not todo or "term" not in CONFIG:
+        return
+    sizes = {a["size"] for m in todo for a in m.get("attachments", [])}
+    known = file_hashes(sizes) if sizes else {}
+    filed, subjects = [], list(CONFIG["subjects"])
+    teachers = sorted({c.get("teacher", "") for c in CONFIG.get("timetable", []) if c.get("teacher")})
+    for m in todo:
+        names = [a["name"] for a in m.get("attachments", [])]
+        try:
+            r = gemini([{"role": "user", "parts": [{"text":
+                f"Today is {today()}. An International Foundation Year student's subjects: {subjects}. Their teachers: "
+                f"{teachers or 'unknown'}. This email came from staff at their college. relevant: true if it is about "
+                "their classes or studies (class material, homework, deadlines, tests or exams, room or timetable "
+                "changes, a cover teacher, a cancelled class); false for admin, marketing, surveys, visas, fees, "
+                "offers, events and personal letters. subject: the subject it is for (one of the list), \"\" if it is "
+                "for no single subject. summary: one short line for a notification. todo: each thing the student must "
+                "DO or remember (do a homework, read, bring, prepare for a test on a date), one short line each with its "
+                "day or date if given, keeping names like Hwk10; empty if none. change: a room, time, teacher or "
+                "cancelled-class change in one line, else \"\". files: the numbers of the attachments that are course "
+                "material (slides, worksheets, readings, homework); never forms, offers or personal documents. admin_todo: "
+                "for an email that is not about a class but asks the student to DO something by a date or urgently "
+                "(return a form, reply about an absence, book or attend a required meeting, a UCAS or visa deadline), "
+                "each action in one short line with its day or date; empty for announcements, clubs, events, "
+                "newsletters, invitations and anything already done or confirmed.\n\n"
+                f"FROM: {m['from_name']} <{m['from']}>\nDATE: {m['date'][:10]}\nSUBJECT: {m['subject']}\n"
+                "ATTACHMENTS: " + ("; ".join(f"{i}. {n}" for i, n in enumerate(names, 1)) or "none") +
+                f"\n\n{m['text'][:6000]}"}]}], None, OUTLOOK_SCHEMA, 0.1, think=False)
+        except GeminiError as e:
+            print("outlook:", e)
+            break                                 # no AI right now: the rest is read next time
+        read.add(m["id"])
+        subj = r.get("subject") if r.get("subject") in CONFIG["subjects"] else ""
+        when = m["date"][:10]
+        recent = when >= (date.today() - timedelta(days=14)).isoformat()      # older emails are history
+        admin = [str(x).strip() for x in r.get("admin_todo") or [] if str(x).strip()][:5]
+        if admin and recent:
+            for t in add_tasks("\n".join(admin), "outlook", None, admin=True):
+                notify([{"id": f"task:{t['text']}", "kind": "task", "link": "#/today",
+                         "title": f"From an email ({m['from_name'] or 'college'})", "text": t["text"]}])
+        if m["id"] in again:                      # read before this version: its notes, tasks and files are in already
+            again.discard(m["id"])
+            for a in m.get("attachments", []):
+                (DATA / a["file"]).unlink(missing_ok=True)
+            m.update(text="", attachments=[], links=[])
+            continue
+        if r.get("relevant"):
+            notify([{"id": f"mail:{m['id'][-40:]}", "kind": "post", "subject": subj, "link": "#/today",
+                     "title": f"Email from {m['from_name'] or m['from']}" + (f" ({SHORT_SUBJECT.get(subj, subj)})" if subj else ""),
+                     "text": str(r.get("summary") or m["subject"])[:160]}])
+            if str(r.get("change") or "").strip():
+                notify([{"id": f"mailchange:{m['id'][-40:]}", "kind": "timetable", "subject": subj, "link": "#/timetable",
+                         "title": "Class change by email", "text": str(r["change"])[:160]}])
+            lines = [str(x).strip() for x in r.get("todo") or [] if str(x).strip()][:8]
+            if lines and recent:
+                for t in add_tasks("\n".join(lines), "outlook", subj or None):
+                    notify([{"id": f"task:{t['text']}", "kind": "task", "subject": t.get("subject", ""), "link": "#/today",
+                             "title": f"{SHORT_SUBJECT.get(t.get('subject'), t.get('subject') or 'Task')}: from an email",
+                             "text": t["text"]}])
+        keep = {i for i in r.get("files") or [] if isinstance(i, int)} if r.get("relevant") and subj else set()
+        for i, a in enumerate(m.get("attachments", []), 1):
+            src = DATA / a["file"]
+            if i in keep and src.exists() and a["sha1"] not in known:
+                title = re.sub(r"[^\w .,()&-]+", " ", m["subject"]).strip()[:60] or "Email"
+                folder = f"{subj}/Outlook/{when} {title}"
+                dest = COURSES / folder / a["name"]
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), dest)
+                known[a["sha1"]] = dest
+                filed.append({"path": f"{folder}/{a['name']}", "course": subj, "kind": "added", "source": "outlook"})
+            elif src.exists():
+                src.unlink()                      # not course material, or already on IntoStudy / OneDrive
+        if m.get("attachments"):
+            shutil.rmtree(DATA / Path(m["attachments"][0]["file"]).parent, ignore_errors=True)
+        m.update(text="", attachments=[], links=[], summary=str(r.get("summary") or "")[:200])   # keep only what's needed
+    with LOCK:
+        mails2 = load("outlook_mail.json", [])
+        done = {m["id"]: m for m in todo if m["id"] in read}
+        save("outlook_mail.json", [done.get(m["id"], m) for m in mails2])
+        auto["read"] = sorted(read | set(load("outlook_auto.json", {}).get("read", [])))[-2000:]
+        auto["admin_only"] = sorted(again)
+        save("outlook_auto.json", auto)
+    outlook_dedup()
+    if filed:
+        log = open(DATA / "outlook.log", "a")
+        subprocess.run([str(VENV_PY), str(APP / "outlook.py"), "text"], cwd=str(APP), stdout=log, stderr=log, env=os.environ)
+        log.close()
+        reload_files()
+        _quiet(auto_sort)
+        _quiet(notify_files, filed, [])
+        with LOCK:
+            sl = load("sync_log.json", [])
+            save("sync_log.json", (sl + [{**x, "date": datetime.now().isoformat(timespec="seconds")} for x in filed])[-2000:])
+        _quiet(plan_refresh)
+
+
+def outlook_dedup():
+    """A file a teacher emailed and later also put on IntoStudy or OneDrive: keep the IntoStudy / OneDrive copy."""
+    mine = [f for f in COURSES.glob("*/Outlook/**/*") if f.is_file()]
+    if not mine:
+        return
+    known = file_hashes({f.stat().st_size for f in mine})
+    for f in mine:
+        if hashlib.sha1(f.read_bytes()).hexdigest() in known:
+            rel = f.relative_to(COURSES).as_posix()
+            f.unlink()
+            (TEXT / (rel + ".txt")).unlink(missing_ok=True)
+    reload_files()
+
+
+def outlook_public():
+    st = load("outlook_status.json", {})
+    return {**{k: st.get(k) for k in ("state", "step", "error", "last_ok")}, "on": outlook_on(),
+            "emails": len(load("outlook_auto.json", {}).get("read", [])),
+            "files": sum(1 for _ in COURSES.glob("*/Outlook/**/*.*")) if COURSES.exists() else 0}
+
+
+def api_outlook(b):
+    """Turn reading class emails on or off, or check now."""
+    if "on" in b:
+        with LOCK:
+            p = progress()
+            p["settings"]["outlook"] = bool(b["on"])
+            save("progress.json", p)
+    if b.get("action") == "check" and outlook_on():
+        if ONEDRIVE["busy"] or sync_running():
+            raise ValueError("Study Desk is busy with IntoStudy or OneDrive right now. Try again in a minute.")
+        threading.Thread(target=lambda: _quiet(onedrive_cycle), daemon=True).start()
+    return outlook_public()
 
 
 def api_compass_connect(b):
@@ -3475,8 +3655,11 @@ def parse_tasks(text, subject=None):
     return out
 
 
-def add_tasks(text, source, subject=None):
+def add_tasks(text, source, subject=None, admin=False):
     new = parse_tasks(text, subject)
+    if admin:                                     # college admin (a form, a meeting, UCAS): not any course
+        new = [{**t, "subject": "", "admin": True, **({"due": None, "due_kind": None} if t.get("due_kind") == "class" else {})}
+               for t in new if not t.get("due") or t["due"] >= today() or t.get("due_kind") == "class"]
     with LOCK:
         tasks = load("tasks.json", [])
         norm = lambda x: re.sub(r"\W+", " ", x.lower()).strip()
@@ -4369,7 +4552,7 @@ def api_setup(_):
                       "running": sync_running(), "found": found, "chosen": chosen, "files": len(ALL_FILES),
                       "known": len(load("sync_manifest.json", {}))},
         "compass": compass_public(), "timetable": len(CONFIG.get("timetable", [])),
-        "onedrive": onedrive_public(),
+        "onedrive": onedrive_public(), "outlook": outlook_public(),
         "programme": {"job": JOBS.get("programme"), "subjects": {n: len(s["topics"]) for n, s in CONFIG["subjects"].items()},
                       "log": tail(DATA / "setup_topics.log", 1500)},
     }
@@ -4457,6 +4640,13 @@ def after_update():
     if not (VENV_PY.exists() and CONFIG["subjects"] and (CONFIG.get("intostudy_courses") or load("courses.json", {}))):
         return save("app_version.json", {"version": now})   # a new install: the setup guide runs the first sync
     CATCHUP.set()
+    for f in DATA.glob("*.log"):                  # older versions could write sign-in cookies into error logs
+        try:
+            t = f.read_text(errors="replace")
+            if paths.redact(t) != t:
+                f.write_text(paths.redact(t))
+        except OSError:
+            pass
     with LOCK:
         smap, changed = sorted_map(), False
         for f, e in list(smap.items()):
@@ -4575,6 +4765,7 @@ ROUTES = {
     ("POST", "/api/setup/done"): api_setup_done,
     ("POST", "/api/compass/connect"): api_compass_connect,
     ("POST", "/api/onedrive"): api_onedrive,
+    ("POST", "/api/outlook"): api_outlook,
     ("GET", "/api/notify"): api_notify,
     ("POST", "/api/notify/seen"): api_notify_seen,
     ("GET", "/api/compass/want"): api_compass_want,
@@ -4647,7 +4838,7 @@ MAC_ROUTES = {api_file_view, api_work_save, api_file_open, api_agent, api_compas
               api_handoff_open, api_files_sort, api_files_assign, api_files_check, api_sync_start, api_settings,
               api_class_start, api_class_stop, api_class_redo, api_class_delete, api_setup_name, api_setup_agy,
               api_setup_courses, api_setup_programme, api_setup_done, api_compass_connect, api_update, api_timetable_image,
-              api_compass_push, api_compass_helper, api_onedrive}
+              api_compass_push, api_compass_helper, api_onedrive, api_outlook}
 PASSWORD = os.environ.get("STUDY_PASSWORD", "")
 SESSION_DAYS = 90
 LOGIN_PAGE = b"""<!doctype html><html lang="en"><head><meta charset="utf-8">

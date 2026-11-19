@@ -9,7 +9,7 @@ rm -rf dist && mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources/study-app
 sed "s/__VERSION__/$VERSION/g" macapp/Info.plist > "$OUT/Contents/Info.plist"
 cp macapp/launcher.sh "$OUT/Contents/MacOS/Study Desk" && chmod +x "$OUT/Contents/MacOS/Study Desk"
 # the code (cloud.py stays: server.py imports it, and it does nothing without Supabase keys)
-for f in server.py paths.py cloud.py sync.py compass.py onedrive.py extract_text.py setup_topics.py pyproject.toml uv.lock VERSION; do
+for f in server.py paths.py cloud.py sync.py compass.py onedrive.py outlook.py extract_text.py setup_topics.py pyproject.toml uv.lock VERSION; do
   cp "$f" "$OUT/Contents/Resources/study-app/"
 done
 rsync -a --exclude ".DS_Store" static compass-extension "$OUT/Contents/Resources/study-app/"

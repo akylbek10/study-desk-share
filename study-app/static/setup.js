@@ -111,6 +111,16 @@ function onedriveHTML(o) {
   return head + (o.state === "idle" && o.step ? stateBox(o.step) : "") + `<div class="row"><button class="btn" type="button" data-act="onedrive">Connect OneDrive</button></div>`;
 }
 
+function outlookHTML(o) {
+  if (!o) return "";
+  const head = `<p><b>Outlook (university email).</b> When a teacher is away, the cover teacher often emails the slides and homework instead. Study Desk reads emails from your teachers and INTO staff only (never other students' or other mail), files their attachments under the right subject and week, and adds what they ask you to do to your tasks. It only reads: nothing is sent, deleted or marked as read. Same Microsoft sign-in.</p>`;
+  if (!o.on) return head + `<div class="row"><button class="btn" type="button" data-act="outlook-on">Read class emails</button></div>`;
+  if (o.state === "login") return head + stateBox("Your Microsoft sign-in has expired: use Sign in again above.", "bad");
+  const box = o.state === "running" ? stateBox(o.step || "Reading emails…") : o.last_ok
+    ? stateBox(`${o.emails} emails from staff read, ${o.files} files filed. ${o.step || ""}`, "ok") : stateBox("On. Emails are read after the next IntoStudy check.");
+  return head + box + `<div class="row"><button class="btn quiet" type="button" data-act="outlook-check">Check emails now</button><button class="btn quiet" type="button" data-act="outlook-off">Turn off</button></div>`;
+}
+
 const BODY = {
   name: s => `<p>Your first name, shown on the Today page.</p>
     <div class="row"><input type="text" id="name" maxlength="40" value="${esc(s.name)}" placeholder="First name" autocomplete="given-name">
@@ -149,7 +159,7 @@ const BODY = {
     if (i.running || i.state === "running") return `<p>Downloading your course files and turning them into text. The first time takes 10–20 minutes; you can carry on with the next step meanwhile.</p>${stateBox(i.step || "Working…")}`;
     if (i.files > 0) return stateBox(`${i.files} course files are ready${chosen.length ? ` from ${chosen.length} courses` : ""}. Study Desk checks IntoStudy for new files every 2 hours.`, "ok")
       + `<div class="row"><button class="btn quiet" type="button" data-act="sync-login">Sign in again</button></div>`
-      + onedriveHTML(s.onedrive);
+      + onedriveHTML(s.onedrive) + outlookHTML(s.outlook);
     return `<p>Study Desk downloads your course files (slides, notes, worksheets, past papers) from man.intostudy.com and keeps them up to date. A Chrome window opens: sign in there yourself with your university Microsoft account.</p>
       ${i.state === "login" && i.step ? stateBox(i.step) : ""}${i.error ? stateBox(i.error, "bad") : ""}
       <div class="row"><button class="btn primary" type="button" data-act="sync-login">Connect IntoStudy</button></div>`;
@@ -218,6 +228,9 @@ document.addEventListener("click", async e => {
     return run(() => api("/api/setup/courses", { ids }), "Downloading your courses…");
   }
   if (act === "onedrive") return run(() => api("/api/onedrive", { action: "connect" }), "Looking for your OneDrive folders…");
+  if (act === "outlook-on") return run(() => api("/api/outlook", { on: true, action: "check" }), "Reading class emails…");
+  if (act === "outlook-off") return run(() => api("/api/outlook", { on: false }), "Class emails turned off");
+  if (act === "outlook-check") return run(() => api("/api/outlook", { action: "check" }), "Checking emails…");
   if (act === "onedrive-login") return run(() => api("/api/onedrive", { action: "login" }), "A window opened: sign in to Microsoft there");
   if (act === "helper-install") return run(() => api("/api/compass/helper", { action: "install" }), "Now: Developer mode on, then drag the folder onto the Chrome page");
   if (act === "helper-folder") return run(() => api("/api/compass/helper", { action: "folder" }), "Finder shows the folder; its location is copied");

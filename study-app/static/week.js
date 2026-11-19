@@ -35,7 +35,7 @@ function weekTopicHTML(t) {
         <a class="btn sm" href="#/topic/${t.id}/check">${icon("target")}Check</a>
       </div>`}</div>
     ${groups.length ? `<div class="wk-files">${groups.map(([k, label]) => `<div><h4>${label}</h4><ul>${t.files[k].map(f =>
-      `<li><a href="${fileHref(f.path)}">${icon("file")}${esc(f.name)}</a>${f.onedrive ? ` <span class="tag">OneDrive</span>` : ""}</li>`).join("")}</ul></div>`).join("")}</div>` : ""}
+      `<li><a href="${fileHref(f.path)}">${icon("file")}${esc(f.name)}</a>${f.onedrive ? ` <span class="tag">OneDrive</span>` : f.email ? ` <span class="tag">Email</span>` : ""}</li>`).join("")}</ul></div>`).join("")}</div>` : ""}
     ${!groups.length && !videos.length && !sources.length ? `<p class="small muted">No files for this topic from your teacher yet. They appear here by themselves; Guided learning already works from the syllabus.</p>` : ""}
     ${t.more > 0 && t.id ? `<p class="small muted"><a href="#/topic/${t.id}/files">All ${t.more + Object.values(t.files).flat().length} files for this topic</a></p>` : ""}
     ${videos.length ? `<h4>Videos</h4><div class="vid-grid">${videos.map(l => `<figure class="vid"><div class="vid-frame">${linkPlayer(l)}</div><figcaption><b>${esc(l.title)}</b></figcaption></figure>`).join("")}</div>` : ""}

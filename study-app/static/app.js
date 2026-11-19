@@ -912,6 +912,7 @@ function renderSettings() {
       ${syncSettingsHTML()}
       ${compassSettingsHTML()}
       ${onedriveSettingsHTML()}
+      ${outlookSettingsHTML()}
       <section class="panel pad" style="display:grid;gap:14px">
         <h2>Gemini</h2>
         <p class="muted small">${S.has_key ? "A key is saved on this Mac. Paste a new one to replace it." : `Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. It's saved only in this app's folder.`}</p>

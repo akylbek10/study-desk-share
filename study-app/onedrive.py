@@ -414,5 +414,4 @@ if __name__ == "__main__":
     try:
         {"explore": explore, "probe": probe, "list": list_roots, "sync": sync, "login": login}[(sys.argv[1:] or ["explore"])[0]]()
     except Exception as e:
-        status(state="error", error=f"{type(e).__name__}: {e}"[:400], finished=now())
-        raise
+        paths.crash(status, state="error", finished=now())

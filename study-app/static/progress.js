@@ -279,8 +279,8 @@ function tasksHTML() {
     ${tasks.length ? `<div class="rows">${tasks.map(t => `
       <div class="pr-row task ${t.done ? "done" : ""} ${t.overdue ? "late" : ""}">
         <button class="pr-tick ${t.done ? "on" : ""}" type="button" data-task="${t.id}" data-act="${t.done ? "undo" : "done"}" aria-pressed="${!!t.done}" aria-label="${t.done ? "Done" : "Mark as done"}: ${esc(t.text)}">${icon("check")}</button>
-        <div class="pr-main"><div class="row-title">${t.subject ? subjPill(t.subject) : ""}<span>${esc(t.text)}</span></div>
-          <div class="row-meta"><span class="${t.overdue ? "warn" : ""}">${t.done ? "done" : esc(WHEN_EN(t.when))}</span><span>${t.source === "telegram" ? "from Telegram" : t.source === "compass" ? "from Compass" : "added here"}</span></div></div>
+        <div class="pr-main"><div class="row-title">${t.subject ? subjPill(t.subject) : t.admin ? `<span class="tag">Admin</span>` : ""}<span>${esc(t.text)}</span></div>
+          <div class="row-meta"><span class="${t.overdue ? "warn" : ""}">${t.done ? "done" : esc(WHEN_EN(t.when))}</span><span>${t.source === "telegram" ? "from Telegram" : t.source === "compass" ? "from Compass" : t.source === "outlook" ? "from an email" : "added here"}</span></div></div>
         <div class="pr-side"><button class="icon-btn" type="button" data-task="${t.id}" data-act="delete" aria-label="Delete task: ${esc(t.text)}" data-tip="Delete">${icon("x")}</button></div>
       </div>`).join("")}</div>` : `<div class="rows empty-note"><b>No tasks</b>Nothing to remember right now.</div>`}
   </section>`;

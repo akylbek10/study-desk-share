@@ -159,6 +159,32 @@ function onedriveSettingsHTML() {
       ${o.state === "login" ? `<button class="btn primary" type="button" data-onedrive="login">Sign in to OneDrive</button>` : ""}
     </div></section>`;
 }
+/* Settings: Outlook (class emails from teachers) */
+function outlookSettingsHTML() {
+  const o = S.outlook;
+  if (!o || S.hosted || !SY.st?.installed) return "";
+  const state = !o.on ? "Off." : o.state === "running" ? esc(o.step || "Reading emails…") : o.state === "login" ? "Your Microsoft sign-in has expired: IntoStudy files → Sign in again."
+    : o.last_ok ? `${o.emails} emails from staff read, ${o.files} files filed. Last checked ${syncAgo(o.last_ok)}.` : "On. Emails are read after the next IntoStudy check.";
+  return `<section class="panel pad" style="display:grid;gap:12px" id="outlook-settings">
+    <h2>Outlook emails</h2>
+    <p class="muted small">Emails from your teachers and INTO staff are read together with IntoStudy, every ${SY.st.every_hours} hours: attachments go under their subject and week, homework and dates go to your tasks. Read-only: nothing is sent, deleted or marked as read. Only what the app needs is kept, not your emails.</p>
+    <p class="small">${state}</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${o.on ? `<button class="btn" type="button" data-outlook="check" ${o.state === "running" ? "disabled" : ""}>Check emails now</button>
+      <button class="btn quiet" type="button" data-outlook="off">Turn off</button>` : `<button class="btn" type="button" data-outlook="on">Read class emails</button>`}
+    </div></section>`;
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-outlook]");
+  if (!b || b.disabled) return;
+  const act = b.dataset.outlook;
+  busy(b, true, "Starting");
+  try { await api("/api/outlook", act === "check" ? { action: "check" } : act === "on" ? { on: true, action: "check" } : { on: false }); toast(act === "off" ? "Class emails turned off." : "Reading class emails…"); }
+  catch (err) { toast(err.message); }
+  const poll = async (n = 0) => { await refresh(); if ((S.onedrive?.running || S.outlook?.state === "running") && n < 400) setTimeout(() => poll(n + 1), 3000); else if (current.page === "settings") renderSettings(); };
+  setTimeout(poll, 2000);
+});
+
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-onedrive]");
   if (!b || b.disabled) return;

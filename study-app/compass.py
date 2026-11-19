@@ -169,5 +169,4 @@ if __name__ == "__main__":
         if not ok and sys.argv[1:] != ["login"] and "--window" in sys.argv:
             run(interactive=True)
     except Exception as e:
-        status(state="error", step="Reading Compass failed.", error=f"{type(e).__name__}: {e}"[:500], finished=now())
-        raise
+        paths.crash(status, state="error", step="Reading Compass failed.", finished=now())

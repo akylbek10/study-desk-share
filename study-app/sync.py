@@ -230,7 +230,7 @@ def signed_in(page):
             page.goto(f"{SITE}/d2l/home", wait_until="domcontentloaded", timeout=60_000)
             settle()
     except Exception as e:
-        print("sign-in:", type(e).__name__, str(e)[:200])
+        print("sign-in:", type(e).__name__, paths.redact(e)[:200])
         return False
     return on_d2l(page.url)
 
@@ -397,7 +397,7 @@ def sync():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(data)
                 except Exception as e:
-                    failed.append(f"{f['path']} ({e})")
+                    failed.append(f"{f['path']} ({paths.redact(e)[:200]})")
                     continue
                 manifest[f["id"]] = {"path": f["path"], "modified": f["modified"], "course": cname}
                 (added if kind == "added" else updated).append({"path": f["path"], "course": cname, "kind": kind})
@@ -427,5 +427,4 @@ if __name__ == "__main__":
     try:
         {"login": login, "courses": list_courses}.get((sys.argv[1:] or [""])[0], sync)()
     except Exception as e:
-        status(state="error", step="The check failed.", error=f"{type(e).__name__}: {e}"[:500], finished=now())
-        raise
+        paths.crash(status, state="error", step="The check failed.", finished=now())
